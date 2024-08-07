@@ -1,2 +1,2 @@
-# calcium_avae
+# Calcium AVAE
 Autoregressive variational autoencoder for calcium imaging data.
