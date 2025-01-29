@@ -77,8 +77,13 @@ def load_data(file_path):
         numpy.ndarray: The loaded data.
     """
     
-    # Load the data
-    data = pd.read_csv(file_path, header=None, sep='\t')
+    # Check if the file has 'csv' or 'csv.gz' in the suffix and use ',' as separator in that case
+    if file_path.endswith('.csv') or file_path.endswith('.csv.gz'):
+        superprint("Loading data from CSV file")
+        data = pd.read_csv(file_path, header=None, sep=',')
+    else:
+        superprint("Loading data from TSV file")
+        data = pd.read_csv(file_path, header=None, sep='\t')
     
     # convert to float 32
     data = data.astype(np.float32)
