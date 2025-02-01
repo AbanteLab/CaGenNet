@@ -1,238 +1,19 @@
+####################################################################################################
+# dependencies
+####################################################################################################
 #%%
 import os
+import torch
 import argparse
-from datetime import datetime
-
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import Dataset, DataLoader
+# specific functions
+from torch.utils.data import DataLoader
 
-####################################################################################################
-# functions
-####################################################################################################
-
-# Define a function to print messages with timestamps
-def superprint(message):
-    
-    # Get the current date and time
-    now = datetime.now()
-    
-    # Format the date and time
-    timestamp = now.strftime("[%Y-%m-%d %H:%M:%S]")
-    
-    # Print the message with the timestamp
-    print(f"{timestamp} {message}")
-
-# Define a dataset class for the calcium imaging data
-class CalciumDataset(Dataset):
-    def __init__(self, data):
-        """
-        Initializes the dataset with the given data.
-        
-        Args:
-            data (numpy.ndarray): The data to be used in the dataset.
-        """
-        
-        # check if it's a tensor or numpy array
-        if isinstance(data, torch.Tensor):
-            self.data = data
-        else:
-            self.data = torch.from_numpy(data).float()
-
-    def __len__(self):
-        """
-        Returns the length of the dataset.
-        
-        Returns:
-            int: The number of samples in the dataset.
-        """
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        """
-        Retrieves the sample at the given index.
-        
-        Args:
-            idx (int): The index of the sample to retrieve.
-        
-        Returns:
-            tuple: The sample and a placeholder value (0).
-        """
-        return self.data[idx], 0  # The second value is a placeholder
-
-def load_data(file_path):
-    """
-    Loads data from a CSV file.
-    
-    Args:
-        file_path (str): The path to the CSV file.
-    
-    Returns:
-        numpy.ndarray: The loaded data.
-    """
-    
-    # Check if the file has 'csv' or 'csv.gz' in the suffix and use ',' as separator in that case
-    if file_path.endswith('.csv') or file_path.endswith('.csv.gz'):
-        superprint("Loading data from CSV file")
-        data = pd.read_csv(file_path, header=None, sep=',')
-    else:
-        superprint("Loading data from TSV file")
-        data = pd.read_csv(file_path, header=None, sep='\t')
-    
-    # convert to float 32
-    data = data.astype(np.float32)
-    
-    # Normalize the data
-    data = (data - data.min()) / (data.max() - data.min()) - 0.5
-
-    # return the data values
-    return data.values
-
-# Define the VAE model
-class VAE(nn.Module):
-    
-    def __init__(self, input_dim, hidden_dim, latent_dim):
-        super(VAE, self).__init__()
-        
-        # dimensions
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        
-        # Encoder layers
-        self.encoder_lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
-        self.encoder_fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.encoder_fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
-        # Decoder layers
-        self.decoder_l1 = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_l2 = nn.LSTM(hidden_dim, input_dim, batch_first=True)
-        
-    def encode(self, x):
-         
-        # get output of lstm
-        _,(hd,_) = self.encoder_lstm(x.unsqueeze(1))
-        
-        # remove unnecessary dimension
-        hd = hd.squeeze(0)
-        
-        # get parameters q(z|x)
-        mu = self.encoder_fc_mu(hd)
-        logvar = self.encoder_fc_logvar(hd)
-        
-        return mu, logvar
-    
-    def sample_z(self, mu, logvar):
-        
-        # reparametrize
-        std = torch.exp(0.5 * logvar)
-        
-        # sample eps~(0,1)
-        eps = torch.randn_like(std)
-
-        # return z
-        return mu + eps * std
-    
-    def decode(self, z):
-        
-        # get linear layer output
-        out = self.decoder_l1(z)
-        
-        # get lstm output (batch_size,1,)
-        out, _ = self.decoder_l2(out.unsqueeze(1))
-        
-        return out.squeeze(1)
-    
-    def forward(self, x):
-        
-        # Encode
-        mu, logvar = self.encode(x)
-        
-        # Reparameterize
-        z = self.sample_z(mu, logvar)
-        
-        # Decode
-        reconstructed_x = self.decode(z)
-        
-        return reconstructed_x, mu, logvar
-
-def loss_function(recon_x, x, mu, logvar):
-    """
-    Computes the loss function for the VAE.
-    
-    Args:
-        recon_x (torch.Tensor): The reconstructed input.
-        x (torch.Tensor): The original input.
-        mu (torch.Tensor): The mean of the latent space.
-        logvar (torch.Tensor): The log variance of the latent space.
-    
-    Returns:
-        torch.Tensor: The computed loss.
-    """
-    
-    # Assuming recon_x and x are your reconstructed and original tensors
-    MSE = F.mse_loss(recon_x.view(-1, recon_x.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    
-    # Normalize by same number of elements as in reconstruction
-    return (MSE + KLD) / x.size(0)
-
-# Define a function to train the VAE model
-def train_vae(model, train_loader, optimizer, device):
-    """
-    Trains the VAE model on the given data.
-
-    Args:
-        model (VAE): The VAE model to train.
-        train_loader (DataLoader): The DataLoader for the training data.
-        optimizer (torch.optim.Optimizer): The optimizer to use for training.
-        device (torch.device): The device to use for training.
-
-    Returns:
-        float: The average training loss.
-    """
-    
-    # Set the model to training mode
-    model.train()
-    
-    # Initialize the training loss
-    train_loss = 0
-    
-    # Iterate over the training data
-    for batch_idx, (data, _) in enumerate(train_loader):
-        
-        # Move the data to the device
-        data = data.to(device)
-        
-        # Zero the gradients
-        optimizer.zero_grad()
-        
-        # Perform a forward pass
-        recon_batch, mu, logvar = model(data)
-        
-        # Compute the loss
-        loss = loss_function(recon_batch, data, mu, logvar)
-        
-        # Perform a backward pass
-        loss.backward()
-        
-        # Clip the gradients
-        clip_grad_norm_(model.parameters(), 1)
-        
-        # Step the optimizer
-        optimizer.step()
-        
-        # Add the loss to the total loss
-        train_loss += loss.item()
-        
-    # Return the average training loss
-    return train_loss / len(train_loader.dataset)
+# import all functions from utils.py
+from utils import *
 
 ####################################################################################################
 # main
@@ -255,6 +36,10 @@ def main():
     parser.add_argument('--retrain', type=bool, default=False, help='Whether to retrain the model (default: False)')
     parser.add_argument('--save', type=bool, default=True, help='Whether to save the model (default: True)')
     parser.add_argument('--outdir', type=str, default='sndgm', help='Directory to save models, embeddings, and losses (default: sndgm)')
+    parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
+    parser.add_argument('--step_size', type=int, default=10, help='Step size for the learning rate scheduler (default: 10)')
+    parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum change in validation loss to qualify as an improvement (default: 0.001)')
+    parser.add_argument('--loss_type', type=str, default='mse', help='Type of loss function to use (default: mse)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -276,6 +61,10 @@ def main():
     
     # Load and preprocess data
     data = load_data(data_path)
+    
+    # normalize the data
+    if args.normalize:
+        data = normalize_data(data)
     
     # Split data into training and validation sets
     train_data, val_data = train_test_split(data, test_size=0.2, random_state=seed)
@@ -301,12 +90,11 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=rate, betas=(0.9, 0.999), eps=1e-6, weight_decay=0, amsgrad=False)
 
     # Define the scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=0.5)
 
     # Early stopping parameters
     counter = 0
     patience = 10
-    min_delta = 0.001
     best_val_loss = float('inf')
 
     # Training loop
@@ -315,7 +103,7 @@ def main():
     for epoch in range(args.epochs):
         
         # Training
-        train_loss = train_vae(model, train_loader, optimizer, device)
+        train_loss = train_vae(model, train_loader, optimizer, device, loss_type=args.loss_type)
         train_losses.append(train_loss)
 
         # Validation
@@ -325,12 +113,12 @@ def main():
             for x, _ in val_loader:
                 x = x.to(device)
                 recon_batch, mu, logvar = model(x)
-                val_loss += loss_function(recon_batch, x, mu, logvar).item()
+                val_loss += loss_function(recon_batch, x, mu, logvar, loss_type=args.loss_type).item()
         val_loss /= len(val_loader.dataset)
         val_losses.append(val_loss)
 
         # Check for early stopping
-        if val_loss < best_val_loss - min_delta:
+        if val_loss < best_val_loss - args.min_delta:
             best_val_loss = val_loss
             counter = 0
         else:
