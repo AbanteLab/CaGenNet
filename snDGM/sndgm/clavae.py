@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
-from utils import *
+from sndgm.utils import superprint, load_data, augment_data, normalize_data, VAE, train_clavae, loss_function
 
 ####################################################################################################
 # main
@@ -26,22 +26,23 @@ def main():
     # argument parser options
     parser = argparse.ArgumentParser(description="Train a Variational Autoencoder (VAE) on calcium imaging data.")
     parser.add_argument('data_path', type=str, help='Path to the CSV file containing the data')
-    parser.add_argument('-l', '--latent', type=int, default=4, help='Dimension of latent space (default: 4)')
-    parser.add_argument('--hidden', type=int, default=64, help='Dimension of hidden layer (default: 64)')
-    parser.add_argument('-e', '--epochs', type=int, default=200, help='Number of training epochs (default: 200)')
-    parser.add_argument('-b', '--batch', type=int, default=32, help='Batch size (default: 32)')
-    parser.add_argument('-s', '--seed', type=int, default=0, help='RNG seed (default: 0)')
-    parser.add_argument('-r', '--rate', type=float, default=0.005, help='Learning rate (default: 0.005)')
-    parser.add_argument('--bkl', type=float, default=1, help='KL divergence beta (default: 1)')
-    parser.add_argument('--bpp', type=float, default=10, help='ROI penalty beta (default: 10)')
-    parser.add_argument('--metric', type=str, default='cosine', help='Metric used in ROI penalty (default: cosine)')
+    parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
     parser.add_argument('--retrain', type=bool, default=False, help='Whether to retrain the model (default: False)')
     parser.add_argument('--save', type=bool, default=True, help='Whether to save the model (default: True)')
+    parser.add_argument('--model_type', type=str, choices=['avae', 'clavae'], default='clavae', help='Type of model to train (default: clavae)')
     parser.add_argument('--outdir', type=str, default='sndgm', help='Directory to save models, embeddings, and losses (default: sndgm)')
-    parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
     parser.add_argument('--step_size', type=int, default=10, help='Step size for the learning rate scheduler (default: 10)')
+    parser.add_argument('--latent', type=int, default=4, help='Dimension of latent space (default: 4)')
+    parser.add_argument('--hidden', type=int, default=64, help='Dimension of hidden layer (default: 64)')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs (default: 200)')
+    parser.add_argument('--batch', type=int, default=32, help='Batch size (default: 32)')
+    parser.add_argument('--seed', type=int, default=0, help='RNG seed (default: 0)')
+    parser.add_argument('--rate', type=float, default=0.005, help='Learning rate (default: 0.005)')
+    parser.add_argument('--rec_loss', type=str, choices=['mse', 'mae'], default='mse', help='Type of loss function to use (default: mse)')
+    parser.add_argument('--bkl', type=float, default=1, help='KL divergence beta (default: 1)')
+    parser.add_argument('--broi', type=float, default=10, help='ROI penalty beta (default: 10)')
+    parser.add_argument('--roi_metric', type=str, choices=['cosine', 'euclidean'], default='cosine', help='roi_metric used in ROI penalty (default: cosine)')
     parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum change in validation loss to qualify as an improvement (default: 0.001)')
-    parser.add_argument('--loss_type', type=str, default='mse', help='Type of loss function to use (default: mse)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -49,24 +50,31 @@ def main():
     #%%
     
     # Access the arguments
-    data_path = args.data_path  # data_path='/tmp/test.txt.gz'
-    seed = args.seed            # seed=0
-    bkl = args.bkl              # bkl=1
-    bpp = args.bpp              # bpp=10
-    retrain = args.retrain      # retrain=True
-    save = args.save            # save=False
-    batch = args.batch          # batch=32
-    latent = args.latent        # latent=4
-    hidden = args.hidden        # hidden=64
-    epochs = args.epochs        # epochs=200
-    rate = args.rate            # rate=0.005
-    outdir = args.outdir        # outdir='/tmp'
-    step_size = args.step_size  # step_size=10
-    loss_type = args.loss_type  # loss_type='mae'
-    metric = args.metric        # metric='cosine'
-        
+    data_path = args.data_path      # data_path='/tmp/test.txt.gz'
+    seed = args.seed                # seed=0
+    bkl = args.bkl                  # bkl=1
+    broi = args.broi                # broi=10
+    retrain = args.retrain          # retrain=True
+    save = args.save                # save=False
+    batch = args.batch              # batch=32
+    latent = args.latent            # latent=4
+    hidden = args.hidden            # hidden=64
+    epochs = args.epochs            # epochs=200
+    rate = args.rate                # rate=0.005
+    outdir = args.outdir            # outdir='/tmp'
+    step_size = args.step_size      # step_size=10
+    rec_loss = args.rec_loss        # rec_loss='mae'
+    roi_metric = args.roi_metric    # roi_metric='cosine'
+    model_type = args.model_type    # model_type='clavae'
+    
     # Define the dictionary for optional arguments
-    optional_args = {'loss_type': loss_type, 'bkl': bkl, 'bpp': bpp, 'loss_type': loss_type, 'metric': metric, 'model_type': 'clavae'}
+    optional_args = {
+        'bkl': bkl, 
+        'broi': broi, 
+        'rec_loss': rec_loss, 
+        'roi_metric': roi_metric,
+        'model_type': model_type
+    }
     
     # Set the random seed for reproducibility
     np.random.seed(seed)
@@ -75,10 +83,15 @@ def main():
     data = load_data(data_path)
     
     # Augment the data if need be
-    reps = 10
-    length = 6000
-    data,idx = augment_data(data,reps,length, seed=seed)
-    
+    if model_type == 'clavae':
+        superprint("Performing data augmentation for CLAVAE model")
+        reps = 10
+        length = 6000
+        data,idx = augment_data(data,reps,length, seed=seed)
+    else:
+        superprint("AVAE model does not require data augmentation")
+        idx = np.arange(data.shape[0])
+        
     # normalize the data
     if args.normalize:
         data = normalize_data(data)
@@ -169,21 +182,35 @@ def main():
     ## Save embeddings of centered interval
     
     # Load original data
-    fluo = load_data(data_path)
     superprint("Saving embeddings")
     
-    # keep only the centered interval of the data with 5,000 points
-    num_cols = fluo.shape[1]
-    center_start = (num_cols - length) // 2
-    center_end = center_start + length
-    fluo = torch.tensor(fluo[:, center_start:center_end])
-    fluo = fluo.to(device)
+    if model_type=='clavae':
+        
+        # load and augment the data
+        reps = 10
+        length = 6000
+        fluo = load_data(data_path)
+        fluo,idx = augment_data(fluo,reps,length, seed=seed)
+        
+        # keep only the centered interval of the data with 5,000 points
+        num_cols = fluo.shape[1]
+        center_start = (num_cols - length) // 2
+        center_end = center_start + length
+        fluo = torch.tensor(fluo[:, center_start:center_end])
+        fluo = fluo.to(device)
     
-    # Save embeddings to a txt.gz file
-    embeddings = model.encode(fluo)[0]
-    embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
-    embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
-
+        # Save embeddings to a txt.gz file
+        embeddings = model.encode(fluo)[0]
+        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
+        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
+        
+    else:
+        
+        # Save embeddings to a txt.gz file
+        embeddings = model.encode(data.to(device))[0]
+        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
+        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
+        
     ## Save training and validation losses
     superprint("Saving training and validation losses")
     losses_df = pd.DataFrame({'train_loss': train_losses, 'val_loss': val_losses})
@@ -191,8 +218,7 @@ def main():
     
     ## Save hyperparameters of the model
     superprint("Saving hyperparameters")
-    hyperparameters = {'seed': seed, 'bkl': bkl, 'bpp': bpp, 'retrain': retrain, 'save': save, 'batch': batch, 'latent': latent, 'hidden': hidden, 'epochs': epochs, 'rate': rate}
-    hyperparameters_df = pd.DataFrame(hyperparameters, index=[0])
+    hyperparameters_df = pd.DataFrame(optional_args, index=[0])
     hyperparameters_df.to_csv(os.path.join(outdir, "hyperparameters.txt.gz"), sep='\t', index=False)
     
     # print final message

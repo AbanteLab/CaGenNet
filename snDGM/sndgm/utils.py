@@ -214,78 +214,27 @@ class VAE(nn.Module):
         
         return reconstructed_x, mu, logvar
 
-# Define a function to train the VAE model
-def train_vae(model, train_loader, optimizer, device, loss_type="mse"):
-    """
-    Trains the VAE model on the given data.
-
-    Args:
-        model (VAE): The VAE model to train.
-        train_loader (DataLoader): The DataLoader for the training data.
-        optimizer (torch.optim.Optimizer): The optimizer to use for training.
-        device (torch.device): The device to use for training.
-
-    Returns:
-        float: The average training loss.
-    """
-    
-    # Set the model to training mode
-    model.train()
-    
-    # Initialize the training loss
-    train_loss = 0
-    
-    # Iterate over the training data
-    for batch_idx, (data, _) in enumerate(train_loader):
-        
-        # Move the data to the device
-        data = data.to(device)
-        
-        # Zero the gradients
-        optimizer.zero_grad()
-        
-        # Perform a forward pass
-        recon_batch, mu, logvar = model(data)
-        
-        # Compute the loss
-        loss = loss_function(recon_batch, data, mu, logvar, loss_type=loss_type)
-        
-        # Perform a backward pass
-        loss.backward()
-        
-        # Clip the gradients
-        clip_grad_norm_(model.parameters(), 1)
-        
-        # Step the optimizer
-        optimizer.step()
-        
-        # Add the loss to the total loss
-        train_loss += loss.item()
-        
-    # Return the average training loss
-    return train_loss / len(train_loader.dataset)
-
-def reconstruction_loss(recon_x, x, loss_type='mse'):
+def reconstruction_loss(recon_x, x, rec_loss='mse'):
     """
     Computes the reconstruction loss for the VAE.
     
     Args:
         recon_x (torch.Tensor): The reconstructed input.
         x (torch.Tensor): The original input.
-        loss_type (str): The type of reconstruction loss to use ('mse' or 'mae').
+        rec_loss (str): The type of reconstruction loss to use ('mse' or 'mae').
     
     Returns:
         torch.Tensor: The computed reconstruction loss.
     """
     
-    if loss_type == 'mse':
+    if rec_loss == 'mse':
         # Mean Squared Error loss
         return F.mse_loss(recon_x.view(-1, recon_x.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
-    elif loss_type == 'mae':
+    elif rec_loss == 'mae':
         # Mean Absolute Error loss
         return F.l1_loss(recon_x.view(-1, recon_x.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
     else:
-        raise ValueError("Invalid loss_type. Expected 'mse' or 'mae'.")
+        raise ValueError("Invalid rec_loss. Expected 'mse' or 'mae'.")
 
 def kl_divergence_loss(mu, logvar):
     """
@@ -301,14 +250,14 @@ def kl_divergence_loss(mu, logvar):
     
     return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-def positive_pairwise_loss(mu, roi, metric='cosine'):
+def positive_pairwise_loss(mu, roi, roi_metric='cosine'):
     """
     Encourages different views of the same ROI to have similar embeddings.
 
     Args:
         mu (torch.Tensor): The mean of the latent space (batch_size, latent_dim).
         roi (torch.Tensor): The region of interest identifiers (batch_size,).
-        metric (str): The metric to use for computing the pairwise loss ('cosine' or 'euclidean').
+        roi_metric (str): The metric to use for computing the pairwise loss ('cosine' or 'euclidean').
         
     Returns:
         torch.Tensor: The computed penalty term.
@@ -335,7 +284,7 @@ def positive_pairwise_loss(mu, roi, metric='cosine'):
             # Extract embeddings for this ROI
             mu_roi = mu[indices]  
             
-            if metric == 'cosine':
+            if roi_metric == 'cosine':
                 
                 # Compute pairwise cosine similarity
                 similarity_matrix = torch.matmul(mu_roi, mu_roi.T)
@@ -343,7 +292,7 @@ def positive_pairwise_loss(mu, roi, metric='cosine'):
                 # Compute loss: minimize distance from perfect similarity (1.0)
                 total_loss += (1 - similarity_matrix).mean()
                 
-            elif metric == 'euclidean':
+            elif roi_metric == 'euclidean':
                 
                 # Compute pairwise euclidean distance
                 distance_matrix = torch.cdist(mu_roi, mu_roi, p=2)
@@ -353,12 +302,12 @@ def positive_pairwise_loss(mu, roi, metric='cosine'):
                 
             else:
                 
-                raise ValueError("Invalid metric. Expected 'cosine' or 'euclidean'.")
+                raise ValueError("Invalid roi_metric. Expected 'cosine' or 'euclidean'.")
 
     # Return total loss
     return total_loss
 
-def loss_function(recon_x, x, mu, logvar, roi, loss_type='mse', model_type='clavae', bkl=1.0, bpp=1.0, metric='cosine'):
+def loss_function(recon_x, x, mu, logvar, roi, **optional_args):
     """
     Computes the total loss function for the VAE, including a penalty term for the distance in z within fluo signals from the same roi.
     
@@ -368,26 +317,30 @@ def loss_function(recon_x, x, mu, logvar, roi, loss_type='mse', model_type='clav
         mu (torch.Tensor): The mean of the latent space.
         logvar (torch.Tensor): The log variance of the latent space.
         roi (torch.Tensor): The region of interest identifiers.
-        loss_type (str): The type of reconstruction loss to use ('mse' or 'mae').
-        bkl (float): The weight for the KL divergence loss.
-        bpp (float): The weight for the InfoNCE loss.
     
     Returns:
         torch.Tensor: The computed total loss.
     """
     
+    # Extract optional arguments
+    bkl = optional_args.get('bkl', 1.0)
+    broi = optional_args.get('broi', 1.0)
+    rec_loss = optional_args.get('rec_loss', 'mse')
+    model_type = optional_args.get('model_type', 'vae')
+    roi_metric = optional_args.get('roi_metric', 'cosine')
+    
     # Compute the reconstruction loss
-    recon_loss = reconstruction_loss(recon_x, x, loss_type) / x.size(0)
+    recon_loss = reconstruction_loss(recon_x, x, rec_loss) / x.size(0)
     
     # Compute the KL divergence loss
     kl_loss = bkl * kl_divergence_loss(mu, logvar) / x.size(0)
     
     # Initialize the InfoNCE loss to 0
-    pp_loss = 0
+    pp_loss = torch.tensor(0)
     
     # Compute the ROI loss if using the CLAVAE model
     if model_type == 'clavae':
-        pp_loss = bpp * 100 * positive_pairwise_loss(mu, roi, metric=metric)  / x.size(0)
+        pp_loss = broi * 100 * positive_pairwise_loss(mu, roi, roi_metric=roi_metric)  / x.size(0)
     
     # Compute the total loss
     total_loss = recon_loss + kl_loss + pp_loss
@@ -395,7 +348,7 @@ def loss_function(recon_x, x, mu, logvar, roi, loss_type='mse', model_type='clav
     return total_loss, recon_loss, kl_loss, pp_loss
 
 # Define a function to train the VAE model
-def train_clavae(model, train_loader, optimizer, device, loss_type="mse", bkl=1.0, bpp=1.0, metric='cosine', model_type='clavae'):
+def train_clavae(model, train_loader, optimizer, device, **optional_args):
     """
     Trains the CLAVAE model using contrastive learning on the given data.
 
@@ -409,16 +362,6 @@ def train_clavae(model, train_loader, optimizer, device, loss_type="mse", bkl=1.
         float: The average training loss.
     """
     
-    # Store optional arguments in a dictionary
-    loss_args = {
-        'loss_type': loss_type,
-        'bkl': bkl,
-        'bpp': bpp,
-        'metric': metric,
-        'loss_type': loss_type,
-        'model_type': model_type
-    }
-        
     # Set the model to training mode
     model.train()
     
@@ -443,7 +386,7 @@ def train_clavae(model, train_loader, optimizer, device, loss_type="mse", bkl=1.
         recon_batch, mu, logvar = model(fluo)
         
         # Compute the loss
-        tot_loss, recon_loss, kl_loss, pp_loss = loss_function(recon_batch, fluo, mu, logvar, roi, **loss_args)
+        tot_loss, recon_loss, kl_loss, pp_loss = loss_function(recon_batch, fluo, mu, logvar, roi, **optional_args)
         
         # Perform a backward pass
         tot_loss.backward()
