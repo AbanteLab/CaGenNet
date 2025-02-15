@@ -10,17 +10,207 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.nn.utils import clip_grad_norm_
 
-# Define a function to print messages with timestamps
-def superprint(message):
+# Define the VAE model
+class CLAVAE(nn.Module):
     
-    # Get the current date and time
-    now = datetime.now()
+    def __init__(self, input_dim, hidden_dim, latent_dim):
+        super(CLAVAE, self).__init__()
+        
+        # dimensions
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        
+        # Encoder layers
+        self.encoder_lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.encoder_fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.encoder_fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
+        # Decoder layers
+        self.decoder_l1 = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_l2 = nn.LSTM(hidden_dim, input_dim, batch_first=True)
+        
+    def encode(self, x):
+         
+        # get output of lstm
+        _,(hd,_) = self.encoder_lstm(x.unsqueeze(1))
+        
+        # remove unnecessary dimension
+        hd = hd.squeeze(0)
+        
+        # get parameters q(z|x)
+        mu = self.encoder_fc_mu(hd)
+        logvar = self.encoder_fc_logvar(hd)
+        
+        return mu, logvar
     
-    # Format the date and time
-    timestamp = now.strftime("[%Y-%m-%d %H:%M:%S]")
+    def sample_z(self, mu, logvar):
+        
+        # reparametrize
+        std = torch.exp(0.5 * logvar)
+        
+        # sample eps~(0,1)
+        eps = torch.randn_like(std)
+
+        # return z
+        return mu + eps * std
     
-    # Print the message with the timestamp
-    print(f"{timestamp} {message}")
+    def decode(self, z):
+        
+        # get linear layer output
+        out = self.decoder_l1(z)
+        
+        # get lstm output (batch_size,1,)
+        out, _ = self.decoder_l2(out.unsqueeze(1))
+        
+        return out.squeeze(1)
+    
+    def forward(self, x):
+        
+        # Encode
+        mu, logvar = self.encode(x)
+        
+        # Reparameterize
+        z = self.sample_z(mu, logvar)
+        
+        # Decode
+        reconstructed_x = self.decode(z)
+        
+        return reconstructed_x, mu, logvar
+
+# Define the ISOVAE model with separate encoders and decoders for amplitude and phase
+class ISOVAE(nn.Module):
+    
+    def __init__(self, input_dim, hidden_dim, latent_dim):
+        super(ISOVAE, self).__init__()
+        
+        # dimensions
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        
+        # Encoder layers for amplitude
+        self.encoder_amp_fc1 = nn.Linear(input_dim, hidden_dim)
+        self.encoder_amp_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.encoder_amp_fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.encoder_amp_fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
+        # Encoder layers for phase
+        self.encoder_phase_fc1 = nn.Linear(input_dim, hidden_dim)
+        self.encoder_phase_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.encoder_phase_fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.encoder_phase_fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.encoder_phase_fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
+        # Decoder layers for amplitude
+        self.decoder_amp_fc1 = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_amp_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.decoder_amp_fc3 = nn.Linear(hidden_dim, input_dim)
+        
+        # Decoder layers for phase
+        self.decoder_phase_fc1 = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_phase_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.decoder_phase_fc3 = nn.Linear(hidden_dim, input_dim)
+        
+        # Decoder layers for signal reconstruction
+        self.decoder_signal_fc1 = nn.Linear(2 * latent_dim, hidden_dim)
+        self.decoder_signal_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.decoder_signal_fc3 = nn.Linear(hidden_dim, input_dim)
+        
+    def encode_amplitude(self, x):
+        
+        # get output of fully connected layers with ReLU activation
+        h1 = F.relu(self.encoder_amp_fc1(x))
+        h2 = F.relu(self.encoder_amp_fc2(h1))
+        
+        # get parameters q(z|x)
+        mu = self.encoder_amp_fc_mu(h2)
+        logvar = self.encoder_amp_fc_logvar(h2)
+        
+        return mu, logvar
+    
+    def encode_phase(self, x):
+        
+        # get output of fully connected layers with ReLU activation
+        h1 = F.relu(self.encoder_phase_fc1(x))
+        h2 = F.relu(self.encoder_phase_fc2(h1))
+        h2 = F.relu(self.encoder_phase_fc2(h2))
+        
+        # get parameters q(z|x)
+        mu = self.encoder_phase_fc_mu(h2)
+        logvar = self.encoder_phase_fc_logvar(h2)
+        
+        return mu, logvar
+    
+    def sample_z(self, mu, logvar):
+        
+        # reparametrize
+        std = torch.exp(0.5 * logvar)
+        
+        # sample eps~(0,1)
+        eps = torch.randn_like(std)
+
+        # return z
+        return mu + eps * std
+    
+    def decode_amplitude(self, z):
+        
+        # get output of fully connected layers with ReLU activation
+        h1 = F.relu(self.decoder_amp_fc1(z))
+        h2 = F.relu(self.decoder_amp_fc2(h1))
+        
+        # get final output
+        out = self.decoder_amp_fc3(h2)
+        
+        return out
+    
+    def decode_phase(self, z):
+        
+        # get output of fully connected layers with ReLU activation
+        h1 = F.relu(self.decoder_phase_fc1(z))
+        h2 = F.relu(self.decoder_phase_fc2(h1))
+        
+        # get final output
+        out = self.decoder_phase_fc3(h2)
+        
+        return out
+    
+    def decode_signal(self, za, zp):
+        
+        # concatenate Za and Zp
+        z = torch.cat((za, zp), dim=-1)
+        
+        # get output of fully connected layers with ReLU activation
+        h1 = F.relu(self.decoder_signal_fc1(z))
+        h2 = F.relu(self.decoder_signal_fc2(h1))
+        
+        # get final output
+        out = self.decoder_signal_fc3(h2)
+        
+        return out
+    
+    def forward(self, x):
+        
+        # Encode amplitude
+        mu_a, logvar_a = self.encode_amplitude(x)
+        
+        # Encode phase
+        mu_p, logvar_p = self.encode_phase(x)
+        
+        # Reparameterize
+        za = self.sample_z(mu_a, logvar_a)
+        zp = self.sample_z(mu_p, logvar_p)
+        
+        # Decode amplitude
+        reconstructed_amp = self.decode_amplitude(za)
+        
+        # Decode phase
+        reconstructed_phase = self.decode_phase(zp)
+        
+        # Decode signal
+        reconstructed_x = self.decode_signal(za, zp)
+        
+        return reconstructed_x, reconstructed_amp, reconstructed_phase, mu_a, logvar_a, mu_p, logvar_p
 
 # Define a dataset class for the calcium imaging data
 class CalciumDataset(Dataset):
@@ -130,6 +320,19 @@ def augment_data(data, N, L, seed=0):
     
     return augmented_data,indices
 
+# Define a function to print messages with timestamps
+def superprint(message):
+    
+    # Get the current date and time
+    now = datetime.now()
+    
+    # Format the date and time
+    timestamp = now.strftime("[%Y-%m-%d %H:%M:%S]")
+    
+    # Print the message with the timestamp
+    print(f"{timestamp} {message}")
+
+# Define a function to normalize the data
 def normalize_data(data):
     """
     Normalizes the data.
@@ -146,80 +349,13 @@ def normalize_data(data):
     
     return normalized_data
 
-# Define the VAE model
-class VAE(nn.Module):
-    
-    def __init__(self, input_dim, hidden_dim, latent_dim):
-        super(VAE, self).__init__()
-        
-        # dimensions
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        
-        # Encoder layers
-        self.encoder_lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
-        self.encoder_fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.encoder_fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
-        # Decoder layers
-        self.decoder_l1 = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_l2 = nn.LSTM(hidden_dim, input_dim, batch_first=True)
-        
-    def encode(self, x):
-         
-        # get output of lstm
-        _,(hd,_) = self.encoder_lstm(x.unsqueeze(1))
-        
-        # remove unnecessary dimension
-        hd = hd.squeeze(0)
-        
-        # get parameters q(z|x)
-        mu = self.encoder_fc_mu(hd)
-        logvar = self.encoder_fc_logvar(hd)
-        
-        return mu, logvar
-    
-    def sample_z(self, mu, logvar):
-        
-        # reparametrize
-        std = torch.exp(0.5 * logvar)
-        
-        # sample eps~(0,1)
-        eps = torch.randn_like(std)
-
-        # return z
-        return mu + eps * std
-    
-    def decode(self, z):
-        
-        # get linear layer output
-        out = self.decoder_l1(z)
-        
-        # get lstm output (batch_size,1,)
-        out, _ = self.decoder_l2(out.unsqueeze(1))
-        
-        return out.squeeze(1)
-    
-    def forward(self, x):
-        
-        # Encode
-        mu, logvar = self.encode(x)
-        
-        # Reparameterize
-        z = self.sample_z(mu, logvar)
-        
-        # Decode
-        reconstructed_x = self.decode(z)
-        
-        return reconstructed_x, mu, logvar
-
-def reconstruction_loss(recon_x, x, rec_loss='mse'):
+# Define a function to compute the reconstruction loss
+def reconstruction_loss(xhat, x, rec_loss='mse'):
     """
-    Computes the reconstruction loss for the VAE.
+    Computes the reconstruction loss between a vector X and a reconstruction of this vector Xhat.
     
     Args:
-        recon_x (torch.Tensor): The reconstructed input.
+        xhat (torch.Tensor): The reconstructed input.
         x (torch.Tensor): The original input.
         rec_loss (str): The type of reconstruction loss to use ('mse' or 'mae').
     
@@ -229,13 +365,14 @@ def reconstruction_loss(recon_x, x, rec_loss='mse'):
     
     if rec_loss == 'mse':
         # Mean Squared Error loss
-        return F.mse_loss(recon_x.view(-1, recon_x.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
+        return F.mse_loss(xhat.view(-1, xhat.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
     elif rec_loss == 'mae':
         # Mean Absolute Error loss
-        return F.l1_loss(recon_x.view(-1, recon_x.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
+        return F.l1_loss(xhat.view(-1, xhat.size(-1)), x.view(-1, x.size(-1)), reduction='sum')
     else:
         raise ValueError("Invalid rec_loss. Expected 'mse' or 'mae'.")
 
+# Define a function to compute the KL divergence loss
 def kl_divergence_loss(mu, logvar):
     """
     Computes the KL divergence loss for the VAE.
@@ -250,6 +387,7 @@ def kl_divergence_loss(mu, logvar):
     
     return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
+# Define a function to compute the pairwise loss
 def positive_pairwise_loss(mu, roi, roi_metric='cosine'):
     """
     Encourages different views of the same ROI to have similar embeddings.
@@ -307,7 +445,8 @@ def positive_pairwise_loss(mu, roi, roi_metric='cosine'):
     # Return total loss
     return total_loss
 
-def loss_function(recon_x, x, mu, logvar, roi, **optional_args):
+# Define a function to compute the total loss
+def loss_clavae(recon_x, x, mu, logvar, roi, **optional_args):
     """
     Computes the total loss function for the VAE, including a penalty term for the distance in z within fluo signals from the same roi.
     
@@ -347,7 +486,63 @@ def loss_function(recon_x, x, mu, logvar, roi, **optional_args):
     
     return total_loss, recon_loss, kl_loss, pp_loss
 
-# Define a function to train the VAE model
+# Define a function to compute the total loss for the ISOVAE model
+def loss_isovae(xhat, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args):
+    """
+    Computes the total loss function for the ISOVAE.
+    
+    Args:
+        xhat (torch.Tensor): The reconstructed input.
+        x (torch.Tensor): The original input.
+        recon_amp (torch.Tensor): The reconstructed amplitude.
+        recon_phase (torch.Tensor): The reconstructed phase.
+        mu_a (torch.Tensor): The mean of the amplitude latent space.
+        logvar_a (torch.Tensor): The log variance of the amplitude latent space.
+        mu_p (torch.Tensor): The mean of the phase latent space.
+        logvar_p (torch.Tensor): The log variance of the phase latent space.
+    
+    Returns:
+        torch.Tensor: The computed total loss.
+    """
+    
+    # Extract optional arguments
+    bkl = optional_args.get('bkl', 1.0)
+    rec_loss = optional_args.get('rec_loss', 'mae')
+    
+    # Compute the reconstruction loss for the signal
+    recon_loss = reconstruction_loss(xhat, x, rec_loss) / x.size(0)
+    
+    # Compute FFT of the original signal
+    fft_x = torch.fft.fft(x)
+    
+    # get amplitudes and phases
+    a = torch.abs(fft_x)
+    p = torch.angle(fft_x)
+    
+    # Normalize amplitude to be between -1 and 1
+    a = (a / 1000) - 1
+    
+    # Normalize phase between -1 and 1
+    p = (p + np.pi) / np.pi - 1
+    
+    # Compute the reconstruction loss for the amplitude
+    recon_amp_loss = reconstruction_loss(recon_amp, a, 'mae') / x.size(0)
+    
+    # Compute the reconstruction loss for the phase
+    recon_phase_loss = reconstruction_loss(recon_phase, p, 'mae') / x.size(0)
+    
+    # Compute the KL divergence loss for amplitude
+    kl_loss_a = bkl * kl_divergence_loss(mu_a, logvar_a) / x.size(0)
+    
+    # Compute the KL divergence loss for phase
+    kl_loss_p = bkl * kl_divergence_loss(mu_p, logvar_p) / x.size(0)
+    
+    # Compute the total loss
+    total_loss = recon_loss + recon_amp_loss + recon_phase_loss + kl_loss_a + kl_loss_p
+    
+    return total_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p
+
+# Define a function to train the CLAVAE model
 def train_clavae(model, train_loader, optimizer, device, **optional_args):
     """
     Trains the CLAVAE model using contrastive learning on the given data.
@@ -386,7 +581,7 @@ def train_clavae(model, train_loader, optimizer, device, **optional_args):
         recon_batch, mu, logvar = model(fluo)
         
         # Compute the loss
-        tot_loss, recon_loss, kl_loss, pp_loss = loss_function(recon_batch, fluo, mu, logvar, roi, **optional_args)
+        tot_loss, recon_loss, kl_loss, pp_loss = loss_clavae(recon_batch, fluo, mu, logvar, roi, **optional_args)
         
         # Perform a backward pass
         tot_loss.backward()
@@ -410,6 +605,80 @@ def train_clavae(model, train_loader, optimizer, device, **optional_args):
     
     # Print average losses
     superprint(f"L_rec: {avg_recon_loss:.6f} | L_kl: {avg_kl_loss:.6f} | L_pp: {avg_pp_loss:.6f}")
+        
+    # Return the average training loss
+    return train_loss / len(train_loader.dataset)
+
+# Define a function to train the IsoVAE model
+def train_isovae(model, train_loader, optimizer, device, **optional_args):
+    """
+    Trains the IsoVAE model using the given data.
+
+    Args:
+        model (ISOVAE): The IsoVAE model to train.
+        train_loader (DataLoader): The DataLoader for the training data.
+        optimizer (torch.optim.Optimizer): The optimizer to use for training.
+        device (torch.device): The device to use for training.
+
+    Returns:
+        float: The average training loss.
+    """
+    
+    # Set the model to training mode
+    model.train()
+    
+    # Initialize the training loss
+    train_loss = 0
+    
+    # Initialize variables to store individual losses
+    total_kl_loss_a = 0
+    total_kl_loss_p = 0
+    total_recon_loss = 0
+    total_recon_amp_loss = 0
+    total_recon_phase_loss = 0
+
+    # Iterate over the training data
+    for batch_idx, (x,) in enumerate(train_loader):
+        
+        # Move the data to the device
+        x = x.to(device)
+        
+        # Zero the gradients
+        optimizer.zero_grad()
+        
+        # Perform a forward pass
+        recon_batch, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p = model(x)
+        
+        # Compute the loss
+        tot_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p = loss_isovae(
+            recon_batch, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args)
+        
+        # Perform a backward pass
+        tot_loss.backward()
+        
+        # Clip the gradients
+        clip_grad_norm_(model.parameters(), 1)
+        
+        # Step the optimizer
+        optimizer.step()
+        
+        # Add the losses to the total losses
+        train_loss += tot_loss.item()
+        total_recon_loss += recon_loss.item()
+        total_recon_amp_loss += recon_amp_loss.item()
+        total_recon_phase_loss += recon_phase_loss.item()
+        total_kl_loss_a += kl_loss_a.item()
+        total_kl_loss_p += kl_loss_p.item()
+    
+    # Calculate average losses
+    avg_recon_loss = total_recon_loss / len(train_loader.dataset)
+    avg_recon_amp_loss = total_recon_amp_loss / len(train_loader.dataset)
+    avg_recon_phase_loss = total_recon_phase_loss / len(train_loader.dataset)
+    avg_kl_loss_a = total_kl_loss_a / len(train_loader.dataset)
+    avg_kl_loss_p = total_kl_loss_p / len(train_loader.dataset)
+    
+    # Print average losses
+    superprint(f"L_rec: {avg_recon_loss:.6f} | L_rec_amp: {avg_recon_amp_loss:.6f} | L_rec_phase: {avg_recon_phase_loss:.6f} | L_kl_a: {avg_kl_loss_a:.6f} | L_kl_p: {avg_kl_loss_p:.6f}")
         
     # Return the average training loss
     return train_loss / len(train_loader.dataset)

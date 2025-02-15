@@ -13,8 +13,8 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
-from sndgm.utils import CLAVAE
-from sndgm.utils import superprint, load_data, augment_data, normalize_data, train_clavae, loss_clavae
+from sndgm.utils import ISOVAE
+from sndgm.utils import superprint, load_data, normalize_data, train_isovae, loss_isovae
 
 ####################################################################################################
 # main
@@ -30,7 +30,6 @@ def main():
     parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
     parser.add_argument('--retrain', type=bool, default=False, help='Whether to retrain the model (default: False)')
     parser.add_argument('--save', type=bool, default=True, help='Whether to save the model (default: True)')
-    parser.add_argument('--model_type', type=str, choices=['avae', 'clavae'], default='clavae', help='Type of model to train (default: clavae)')
     parser.add_argument('--outdir', type=str, default='sndgm', help='Directory to save models, embeddings, and losses (default: sndgm)')
     parser.add_argument('--step_size', type=int, default=10, help='Step size for the learning rate scheduler (default: 10)')
     parser.add_argument('--latent', type=int, default=4, help='Dimension of latent space (default: 4)')
@@ -39,10 +38,8 @@ def main():
     parser.add_argument('--batch', type=int, default=32, help='Batch size (default: 32)')
     parser.add_argument('--seed', type=int, default=0, help='RNG seed (default: 0)')
     parser.add_argument('--rate', type=float, default=0.005, help='Learning rate (default: 0.005)')
-    parser.add_argument('--rec_loss', type=str, choices=['mse', 'mae'], default='mse', help='Type of loss function to use (default: mse)')
+    parser.add_argument('--rec_loss', type=str, choices=['mse', 'mae'], default='mae', help='Type of loss function to use (default: mse)')
     parser.add_argument('--bkl', type=float, default=1, help='KL divergence beta (default: 1)')
-    parser.add_argument('--broi', type=float, default=10, help='ROI penalty beta (default: 10)')
-    parser.add_argument('--roi_metric', type=str, choices=['cosine', 'euclidean'], default='cosine', help='roi_metric used in ROI penalty (default: cosine)')
     parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum change in validation loss to qualify as an improvement (default: 0.001)')
     
     # Parse arguments
@@ -51,64 +48,47 @@ def main():
     #%%
     
     # Access the arguments
-    data_path = args.data_path      # data_path='/tmp/test.txt.gz'
+    data_path = args.data_path      # data_path="/pool01/data/private/canals_lab/processed/calcium_imaging/hdrep/xf.csv.gz"
     seed = args.seed                # seed=0
     bkl = args.bkl                  # bkl=1
-    broi = args.broi                # broi=10
     retrain = args.retrain          # retrain=True
     save = args.save                # save=False
     batch = args.batch              # batch=32
-    latent = args.latent            # latent=4
-    hidden = args.hidden            # hidden=64
+    latent = args.latent            # latent=16
+    hidden = args.hidden            # hidden=256
     epochs = args.epochs            # epochs=200
     rate = args.rate                # rate=0.005
     outdir = args.outdir            # outdir='/tmp'
     step_size = args.step_size      # step_size=10
     rec_loss = args.rec_loss        # rec_loss='mae'
-    roi_metric = args.roi_metric    # roi_metric='cosine'
-    model_type = args.model_type    # model_type='clavae'
+    min_delta = args.min_delta      # min_delta=0.001
     
     # Define the dictionary for optional arguments
-    optional_args = {
-        'bkl': bkl, 
-        'broi': broi, 
-        'rec_loss': rec_loss, 
-        'roi_metric': roi_metric,
-        'model_type': model_type
-    }
+    optional_args = {'bkl': bkl, 'rec_loss': rec_loss}
     
     # Set the random seed for reproducibility
     np.random.seed(seed)
             
     # Load and preprocess data
-    data = load_data(data_path)
+    x = load_data(data_path)
     
-    # Augment the data if need be
-    if model_type == 'clavae':
-        superprint("Performing data augmentation for CLAVAE model")
-        reps = 10
-        length = 6000
-        data,idx = augment_data(data,reps,length, seed=seed)
-    else:
-        superprint("Chosen model does not require data augmentation")
-        idx = np.arange(data.shape[0])
-        
     # normalize the data
     if args.normalize:
-        data = normalize_data(data)
+        x = normalize_data(x)
+    
+    # Get the indices of the data
+    idx = np.arange(x.shape[0])
     
     # Split data into training and validation sets
-    train_data, val_data, train_idx, val_idx = train_test_split(data, idx, test_size=0.2, random_state=seed)
+    xtrain, xval, itrain, ival = train_test_split(x, idx, test_size=0.2, random_state=seed)
     
-    # flatten the data
-    train_data = train_data.reshape(-1, train_data.shape[-1])
-    val_data = val_data.reshape(-1, val_data.shape[-1])
-    train_idx = train_idx.reshape(-1)
-    val_idx = val_idx.reshape(-1)
+    # get magnitude and phase
+    xtrain = torch.tensor(xtrain, dtype=torch.float32)
+    xval = torch.tensor(xval, dtype=torch.float32)
     
     # Create datasets
-    train_dataset = TensorDataset(torch.tensor(train_data), torch.tensor(train_idx))
-    val_dataset = TensorDataset(torch.tensor(val_data), torch.tensor(val_idx))
+    train_dataset = TensorDataset(xtrain)
+    val_dataset = TensorDataset(xval)
     
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch, shuffle=False)
@@ -122,7 +102,8 @@ def main():
         superprint("Inference done on CPU")
         
     # Initialize model, optimizer, and loss function
-    model = CLAVAE(input_dim=train_data.shape[1], latent_dim=latent, hidden_dim=hidden).to(device)
+    model = ISOVAE(input_dim=xtrain.shape[1], latent_dim=latent, hidden_dim=hidden).to(device)
+    superprint(xtrain.shape[1])
     
     # Define the optimizer
     superprint("Setting up optimizer")
@@ -137,28 +118,28 @@ def main():
     best_val_loss = float('inf')
 
     # Training loop
-    train_losses = []
     val_losses = []
-    for epoch in range(args.epochs):
+    train_losses = []
+    for epoch in range(epochs):
         
         # Training
-        train_loss = train_clavae(model, train_loader, optimizer, device, **optional_args)
+        train_loss = train_isovae(model, train_loader, optimizer, device, **optional_args)
         train_losses.append(train_loss)
 
         # Validation
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for fluo, roi in val_loader:
-                fluo = fluo.to(device)
-                recon_batch, mu, logvar = model(fluo)
-                val_tot_loss, _, _, _ = loss_clavae(recon_batch, fluo, mu, logvar, roi, **optional_args)
+            for (xbatch,) in val_loader:
+                xbatch = xbatch.to(device)
+                xhat, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p = model(xbatch)
+                val_tot_loss, _, _, _, _, _ = loss_isovae(xhat, xbatch, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args)
                 val_loss += val_tot_loss.item()
         val_loss /= len(val_loader.dataset)
         val_losses.append(val_loss)
 
         # Check for early stopping
-        if val_loss < best_val_loss - args.min_delta:
+        if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             counter = 0
         else:
@@ -182,35 +163,14 @@ def main():
 
     ## Save embeddings of centered interval
     
-    # Load original data
+    # Save embeddings to a txt.gz file
     superprint("Saving embeddings")
-    
-    if model_type=='clavae':
-        
-        # load and augment the data
-        reps = 10
-        length = 6000
-        fluo = load_data(data_path)
-        fluo,idx = augment_data(fluo,reps,length, seed=seed)
-        
-        # keep only the centered interval of the data with 5,000 points
-        num_cols = fluo.shape[1]
-        center_start = (num_cols - length) // 2
-        center_end = center_start + length
-        fluo = torch.tensor(fluo[:, center_start:center_end])
-        fluo = fluo.to(device)
-    
-        # Save embeddings to a txt.gz file
-        embeddings = model.encode(fluo)[0]
-        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
-        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
-        
-    else:
-        
-        # Save embeddings to a txt.gz file
-        embeddings = model.encode(data.to(device))[0]
-        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
-        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
+    mu_a,logvar_a = model.encode_amplitude(torch.tensor(x).to(device))
+    mu_p,logvar_p = model.encode_phase(torch.tensor(x).to(device))
+    za_df = pd.DataFrame(mu_a.cpu().detach().numpy())
+    zp_df = pd.DataFrame(mu_p.cpu().detach().numpy())
+    za_df.to_csv(os.path.join(outdir, "za_embeddings.txt.gz"), sep='\t', index=False, header=False)
+    zp_df.to_csv(os.path.join(outdir, "zp_embeddings.txt.gz"), sep='\t', index=False, header=False)
         
     ## Save training and validation losses
     superprint("Saving training and validation losses")
