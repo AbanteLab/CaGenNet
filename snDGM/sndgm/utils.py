@@ -81,13 +81,14 @@ class CLAVAE(nn.Module):
 # Define the ISOVAE model with separate encoders and decoders for amplitude and phase
 class ISOVAE(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, latent_dim):
+    def __init__(self, input_dim, hidden_dim, latent_dim, fft_comp):
         super(ISOVAE, self).__init__()
         
         # dimensions
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        self.fft_comp = fft_comp
         
         # Encoder layers for amplitude
         self.encoder_amp_fc1 = nn.Linear(input_dim, hidden_dim)
@@ -104,18 +105,18 @@ class ISOVAE(nn.Module):
         
         # Decoder layers for amplitude
         self.decoder_amp_fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_amp_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.decoder_amp_fc3 = nn.Linear(hidden_dim, input_dim)
+        self.decoder_amp_fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+        self.decoder_amp_fc3 = nn.Linear(2 * hidden_dim, fft_comp)
         
         # Decoder layers for phase
         self.decoder_phase_fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_phase_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.decoder_phase_fc3 = nn.Linear(hidden_dim, input_dim)
+        self.decoder_phase_fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+        self.decoder_phase_fc3 = nn.Linear(2 * hidden_dim, fft_comp)
         
         # Decoder layers for signal reconstruction
-        self.decoder_signal_fc1 = nn.Linear(2 * latent_dim, hidden_dim)
-        self.decoder_signal_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.decoder_signal_fc3 = nn.Linear(hidden_dim, input_dim)
+        self.decoder_signal_fc1 = nn.Linear(2 * latent_dim, 2 * hidden_dim)
+        self.decoder_signal_fc2 = nn.Linear(2 * hidden_dim, 4 * hidden_dim)
+        self.decoder_signal_fc3 = nn.Linear(4 * hidden_dim, input_dim)
         
     def encode_amplitude(self, x):
         
@@ -272,6 +273,28 @@ def load_data(file_path):
     data = data.astype(np.float32)
     
     return data.values
+
+def num_freq_components(fs, N):
+    """
+    Computes the number of frequency components up to the Nyquist frequency (fs/2)
+    for a signal of length N sampled at frequency fs.
+
+    Args:
+        fs (float): Sampling frequency in Hz.
+        N (int): Number of timepoints in the signal.
+
+    Returns:
+        int: Number of frequency components up to fs/2.
+        float: Frequency resolution (Δf).
+        numpy.ndarray: Array of frequency bins up to fs/2.
+    """
+    import numpy as np
+
+    num_components = N // 2  # Number of bins up to Nyquist frequency
+    delta_f = fs / N  # Frequency resolution
+    freq_bins = np.linspace(0, fs / 2, num_components)  # Frequency bins
+
+    return num_components, delta_f, freq_bins
 
 def augment_data(data, N, L, seed=0):
     """
@@ -487,15 +510,15 @@ def loss_clavae(recon_x, x, mu, logvar, roi, **optional_args):
     return total_loss, recon_loss, kl_loss, pp_loss
 
 # Define a function to compute the total loss for the ISOVAE model
-def loss_isovae(xhat, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args):
+def loss_isovae(xhat, x, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, **optional_args):
     """
     Computes the total loss function for the ISOVAE.
     
     Args:
         xhat (torch.Tensor): The reconstructed input.
         x (torch.Tensor): The original input.
-        recon_amp (torch.Tensor): The reconstructed amplitude.
-        recon_phase (torch.Tensor): The reconstructed phase.
+        ahat (torch.Tensor): The reconstructed amplitude.
+        phat (torch.Tensor): The reconstructed phase.
         mu_a (torch.Tensor): The mean of the amplitude latent space.
         logvar_a (torch.Tensor): The log variance of the amplitude latent space.
         mu_p (torch.Tensor): The mean of the phase latent space.
@@ -506,11 +529,16 @@ def loss_isovae(xhat, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p,
     """
     
     # Extract optional arguments
+    fs = optional_args.get('fs', 20.0)
     bkl = optional_args.get('bkl', 1.0)
     rec_loss = optional_args.get('rec_loss', 'mae')
     
-    # Compute the reconstruction loss for the signal
-    recon_loss = reconstruction_loss(xhat, x, rec_loss) / x.size(0)
+    # NOTE: consider the following:
+    # - We could do the reconstruction of X doing the ifft of Ahat and Phat
+    # - We could implicitly apply a low pass filter - this could be problematic though
+    
+    # TODO:
+    # - Make code more efficient by precomputing the mask
     
     # Compute FFT of the original signal
     fft_x = torch.fft.fft(x)
@@ -519,17 +547,27 @@ def loss_isovae(xhat, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p,
     a = torch.abs(fft_x)
     p = torch.angle(fft_x)
     
-    # Normalize amplitude to be between -1 and 1
-    a = (a / 1000) - 1
+    # Compute the frequency bins
+    freq_bins = torch.fft.fftfreq(x.size(-1), d=1/fs)
     
-    # Normalize phase between -1 and 1
-    p = (p + np.pi) / np.pi - 1
+    # Mask to keep only components with frequency at most fs/2
+    mask = (freq_bins >= 0) & (freq_bins <= fs/2)
+    
+    # Apply the mask to amplitude and phase
+    a = a[:, mask]
+    p = p[:, mask]
+    
+    # Normalize amplitude to be between 0 and 1
+    a = (a - a.min()) / (a.max() - a.min())
+    
+    # Compute the reconstruction loss for the signal
+    recon_loss = reconstruction_loss(xhat, x, rec_loss) / x.size(0)
     
     # Compute the reconstruction loss for the amplitude
-    recon_amp_loss = reconstruction_loss(recon_amp, a, 'mae') / x.size(0)
+    recon_amp_loss = reconstruction_loss(ahat, a, 'mae') / x.size(0)
     
-    # Compute the reconstruction loss for the phase
-    recon_phase_loss = reconstruction_loss(recon_phase, p, 'mae') / x.size(0)
+    # Compute the reconstruction loss for the phase (cosine similarity)
+    recon_phase_loss = torch.mean(1 - torch.cos(p - phat)) / x.size(0)
     
     # Compute the KL divergence loss for amplitude
     kl_loss_a = bkl * kl_divergence_loss(mu_a, logvar_a) / x.size(0)
@@ -540,6 +578,7 @@ def loss_isovae(xhat, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p,
     # Compute the total loss
     total_loss = recon_loss + recon_amp_loss + recon_phase_loss + kl_loss_a + kl_loss_p
     
+    # Return the total loss and individual losses
     return total_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p
 
 # Define a function to train the CLAVAE model

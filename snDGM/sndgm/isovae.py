@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
 from sndgm.utils import ISOVAE
-from sndgm.utils import superprint, load_data, normalize_data, train_isovae, loss_isovae
+from sndgm.utils import superprint, load_data, normalize_data, train_isovae, loss_isovae, num_freq_components
 
 ####################################################################################################
 # main
@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a Variational Autoencoder (VAE) on calcium imaging data.")
     parser.add_argument('data_path', type=str, help='Path to the CSV file containing the data')
     parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
+    parser.add_argument('--fs', type=int, default=20, help='Sampling frequency (default: 20)')
     parser.add_argument('--retrain', type=bool, default=False, help='Whether to retrain the model (default: False)')
     parser.add_argument('--save', type=bool, default=True, help='Whether to save the model (default: True)')
     parser.add_argument('--outdir', type=str, default='sndgm', help='Directory to save models, embeddings, and losses (default: sndgm)')
@@ -62,9 +63,10 @@ def main():
     step_size = args.step_size      # step_size=10
     rec_loss = args.rec_loss        # rec_loss='mae'
     min_delta = args.min_delta      # min_delta=0.001
+    fs = args.fs                    # fs=20
     
     # Define the dictionary for optional arguments
-    optional_args = {'bkl': bkl, 'rec_loss': rec_loss}
+    optional_args = {'bkl': bkl, 'rec_loss': rec_loss, 'fs' : fs}
     
     # Set the random seed for reproducibility
     np.random.seed(seed)
@@ -100,10 +102,12 @@ def main():
         superprint("Inference done on GPU")
     else:
         superprint("Inference done on CPU")
-        
+    
+    # get number of frequency components
+    fft_comp, _, _ = num_freq_components(fs, xtrain.shape[1])
+    
     # Initialize model, optimizer, and loss function
-    model = ISOVAE(input_dim=xtrain.shape[1], latent_dim=latent, hidden_dim=hidden).to(device)
-    superprint(xtrain.shape[1])
+    model = ISOVAE(input_dim=xtrain.shape[1], latent_dim=latent, hidden_dim=hidden, fft_comp=fft_comp).to(device)
     
     # Define the optimizer
     superprint("Setting up optimizer")

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
 #%%
 
 # Generate a synthetic signal: a sine wave with a transient spike
@@ -24,33 +25,6 @@ plt.title("Signals")
 plt.legend()
 plt.show()
 
-# # Perform Continuous Wavelet Transform (CWT) on the first signal
-# scales = np.arange(1, 128)
-# coeffs, freqs = pywt.cwt(signal, scales, 'cmor')
-
-# # Plot the wavelet coefficients of the first signal
-# plt.figure(figsize=(6, 3))
-# plt.imshow(np.abs(coeffs), extent=[0, 1, 1, 128], cmap='PRGn', aspect='auto',
-#            vmax=abs(coeffs).max(), vmin=-abs(coeffs).max())
-# plt.colorbar()
-# plt.ylabel("Scale")
-# plt.xlabel("Time")
-# plt.title("Wavelet Coefficients of Signal 1")
-# plt.show()
-
-# # Perform Continuous Wavelet Transform (CWT) on the second signal
-# coeffs2, freqs2 = pywt.cwt(signal2, scales, 'cmor')
-
-# # Plot the wavelet coefficients of the second signal
-# plt.figure(figsize=(6, 3))
-# plt.imshow(np.abs(coeffs2), extent=[0, 1, 1, 128], cmap='PRGn', aspect='auto',
-#            vmax=abs(coeffs2).max(), vmin=-abs(coeffs2).max())
-# plt.colorbar()
-# plt.ylabel("Scale")
-# plt.xlabel("Time")
-# plt.title("Wavelet Coefficients of Signal 2")
-# plt.show()
-
 #%%
 
 # Perform Fast Fourier Transform (FFT) on the first signal
@@ -66,6 +40,16 @@ fft_signal2 = np.fft.fft(signal2)
 # get amplitudes and phases
 a2 = np.abs(fft_signal2)
 p2 = np.angle(fft_signal2)
+
+# plot a1 as a fuction of frequency
+plt.figure(figsize=(6, 3))
+frequencies = np.fft.fftfreq(len(signal), 1/1000)
+plt.plot(frequencies, a1)
+plt.xlim(-25, 25)
+plt.ylabel("Amplitude")
+plt.xlabel("Frequency (Hz)")
+plt.title("Amplitude Spectrum of Signal 1")
+plt.show()
 
 # reconstruct signal2 from the FFT of signal2 but using the phase from signal1
 reconstructed_signal2 = np.fft.ifft(a2 * np.exp(1j * p1))
@@ -87,6 +71,8 @@ plt.show()
 ## The real data can be well reconstructed using the FFT as well. This shows that we should
 ## be able to train a model that predicts the coefficients of the FFT and reconstruct the signal.
 
+fs = 20
+
 # input data
 xfile="/pool01/data/private/canals_lab/processed/calcium_imaging/hdrep/xf.csv.gz"
 
@@ -104,6 +90,27 @@ x_fft = np.fft.fft(xs)
 # get the amplitudes and phases
 a = np.abs(x_fft)
 p = np.angle(x_fft)
+
+# Compute the frequency bins
+freq_bins = torch.fft.fftfreq(xs.shape[1], d=1/fs)
+    
+# Mask to keep only components with frequency at most fs/2
+mask = (freq_bins >= 0) & (freq_bins <= fs/2)
+
+# count how many positive frequencies we have
+n_pos_freqs = mask.sum()
+
+# plot spectrum of the first row
+plt.figure(figsize=(6, 3))
+plt.plot(frequencies, a[4])
+plt.xlim(-30, 30)
+plt.ylabel("Amplitude")
+plt.xlabel("Frequency (Hz)")
+plt.title("Amplitude Spectrum of the First Row")
+plt.show()
+
+# apply low pass filter to all rows
+a[a < 10] = 0
 
 # reconstruct the data
 x_reconstructed = np.real(np.fft.ifft(a * np.exp(1j * p)))
@@ -128,6 +135,10 @@ for i in range(10):
 plt.tight_layout()
 plt.show()
 
+#%%
+#compute MSE of each reconstructed signal
+mse = np.mean((xs - x_reconstructed)**2, axis=1)
+mse
 # %%
 
 # get an index and shift it
@@ -170,3 +181,4 @@ for i in range(10):
 
 plt.tight_layout()
 plt.show()
+# %%
