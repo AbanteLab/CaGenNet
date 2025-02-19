@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
 from sndgm.utils import ISOVAE
-from sndgm.utils import superprint, load_data, normalize_data, train_isovae, loss_isovae, num_freq_components
+from sndgm.utils import superprint, load_data, normalize_data, train_isovae, loss_isovae
 
 ####################################################################################################
 # main
@@ -77,7 +77,7 @@ def main():
     # normalize the data
     if args.normalize:
         x = normalize_data(x)
-    
+     
     # Get the indices of the data
     idx = np.arange(x.shape[0])
     
@@ -103,11 +103,8 @@ def main():
     else:
         superprint("Inference done on CPU")
     
-    # get number of frequency components
-    fft_comp, _, _ = num_freq_components(fs, xtrain.shape[1])
-    
     # Initialize model, optimizer, and loss function
-    model = ISOVAE(input_dim=xtrain.shape[1], latent_dim=latent, hidden_dim=hidden, fft_comp=fft_comp).to(device)
+    model = ISOVAE(input_dim=xtrain.shape[1], hidden_dim=hidden, latent_dim=latent).to(device)
     
     # Define the optimizer
     superprint("Setting up optimizer")
@@ -118,7 +115,7 @@ def main():
 
     # Early stopping parameters
     counter = 0
-    patience = 10
+    patience = 20
     best_val_loss = float('inf')
 
     # Training loop
@@ -127,7 +124,7 @@ def main():
     for epoch in range(epochs):
         
         # Training
-        train_loss = train_isovae(model, train_loader, optimizer, device, **optional_args)
+        train_loss = train_isovae(model, train_loader, optimizer, device, epoch, **optional_args)
         train_losses.append(train_loss)
 
         # Validation
@@ -136,8 +133,8 @@ def main():
         with torch.no_grad():
             for (xbatch,) in val_loader:
                 xbatch = xbatch.to(device)
-                xhat, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p = model(xbatch)
-                val_tot_loss, _, _, _, _, _ = loss_isovae(xhat, xbatch, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args)
+                mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p = model(xbatch)
+                val_tot_loss, _, _, _, _, _, _ = loss_isovae(xbatch, mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, epoch, **optional_args)
                 val_loss += val_tot_loss.item()
         val_loss /= len(val_loader.dataset)
         val_losses.append(val_loss)

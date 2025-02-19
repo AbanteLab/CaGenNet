@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.nn.utils import clip_grad_norm_
+import time
 
 # Define the VAE model
 class CLAVAE(nn.Module):
@@ -81,18 +82,18 @@ class CLAVAE(nn.Module):
 # Define the ISOVAE model with separate encoders and decoders for amplitude and phase
 class ISOVAE(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim, latent_dim, fft_comp):
+    def __init__(self, input_dim, hidden_dim, latent_dim):
         super(ISOVAE, self).__init__()
         
         # dimensions
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
-        self.fft_comp = fft_comp
         
         # Encoder layers for amplitude
         self.encoder_amp_fc1 = nn.Linear(input_dim, hidden_dim)
         self.encoder_amp_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.encoder_amp_fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.encoder_amp_fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.encoder_amp_fc_logvar = nn.Linear(hidden_dim, latent_dim)
         
@@ -103,43 +104,50 @@ class ISOVAE(nn.Module):
         self.encoder_phase_fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.encoder_phase_fc_logvar = nn.Linear(hidden_dim, latent_dim)
         
+        # Compute the number of frequency components
+        self.num_components = rfft_num_components(input_dim)
+        
         # Decoder layers for amplitude
         self.decoder_amp_fc1 = nn.Linear(latent_dim, hidden_dim)
         self.decoder_amp_fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
-        self.decoder_amp_fc3 = nn.Linear(2 * hidden_dim, fft_comp)
+        self.decoder_amp_fc3 = nn.Linear(2 * hidden_dim, self.num_components)
+        
+        # Decoder layers for amplitude mask
+        self.decoder_mask_fc1 = nn.Linear(latent_dim, hidden_dim)
+        self.decoder_mask_fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+        self.decoder_mask_fc3 = nn.Linear(2 * hidden_dim, self.num_components)
         
         # Decoder layers for phase
         self.decoder_phase_fc1 = nn.Linear(latent_dim, hidden_dim)
         self.decoder_phase_fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
-        self.decoder_phase_fc3 = nn.Linear(2 * hidden_dim, fft_comp)
+        self.decoder_phase_fc3 = nn.Linear(2 * hidden_dim, self.num_components)
         
-        # Decoder layers for signal reconstruction
-        self.decoder_signal_fc1 = nn.Linear(2 * latent_dim, 2 * hidden_dim)
-        self.decoder_signal_fc2 = nn.Linear(2 * hidden_dim, 4 * hidden_dim)
-        self.decoder_signal_fc3 = nn.Linear(4 * hidden_dim, input_dim)
+        # Dropout layer
+        self.dropout = nn.Dropout(p=0.8)
         
     def encode_amplitude(self, x):
         
         # get output of fully connected layers with ReLU activation
-        h1 = F.relu(self.encoder_amp_fc1(x))
-        h2 = F.relu(self.encoder_amp_fc2(h1))
+        h = torch.relu(self.encoder_amp_fc1(x))
+        h = torch.relu(self.encoder_amp_fc2(h))
+        h = self.encoder_amp_fc3(h)
         
         # get parameters q(z|x)
-        mu = self.encoder_amp_fc_mu(h2)
-        logvar = self.encoder_amp_fc_logvar(h2)
+        mu = self.encoder_amp_fc_mu(h)
+        logvar = self.encoder_amp_fc_logvar(h)
         
         return mu, logvar
     
     def encode_phase(self, x):
         
         # get output of fully connected layers with ReLU activation
-        h1 = F.relu(self.encoder_phase_fc1(x))
-        h2 = F.relu(self.encoder_phase_fc2(h1))
-        h2 = F.relu(self.encoder_phase_fc2(h2))
+        h = torch.relu(self.encoder_phase_fc1(x))
+        h = torch.relu(self.encoder_phase_fc2(h))
+        h = self.encoder_phase_fc3(h)
         
         # get parameters q(z|x)
-        mu = self.encoder_phase_fc_mu(h2)
-        logvar = self.encoder_phase_fc_logvar(h2)
+        mu = self.encoder_phase_fc_mu(h)
+        logvar = self.encoder_phase_fc_logvar(h)
         
         return mu, logvar
     
@@ -156,25 +164,34 @@ class ISOVAE(nn.Module):
     
     def decode_amplitude(self, z):
         
+        # get output of fully connected layers with ReLU activation and dropout
+        h = torch.relu(self.decoder_amp_fc1(z))
+        h = self.dropout(h)
+        h = torch.relu(self.decoder_amp_fc2(h))
+        h = self.dropout(h)
+        h = self.decoder_amp_fc3(h)
+        
+        return torch.sigmoid(h)
+
+    def decode_mask(self, z):
+        
         # get output of fully connected layers with ReLU activation
-        h1 = F.relu(self.decoder_amp_fc1(z))
-        h2 = F.relu(self.decoder_amp_fc2(h1))
+        h = torch.relu(self.decoder_mask_fc1(z))
+        h = torch.relu(self.decoder_mask_fc2(h))
+        h = self.decoder_mask_fc3(h)
         
-        # get final output
-        out = self.decoder_amp_fc3(h2)
-        
-        return out
+        return torch.sigmoid(h)
     
     def decode_phase(self, z):
         
-        # get output of fully connected layers with ReLU activation
-        h1 = F.relu(self.decoder_phase_fc1(z))
-        h2 = F.relu(self.decoder_phase_fc2(h1))
+        # get output of fully connected layers with ReLU activation and dropout
+        h = torch.relu(self.decoder_phase_fc1(z))
+        h = self.dropout(h)
+        h = torch.relu(self.decoder_phase_fc2(h))
+        h = self.dropout(h)
+        h = self.decoder_phase_fc3(h)
         
-        # get final output
-        out = self.decoder_phase_fc3(h2)
-        
-        return out
+        return torch.sigmoid(h)
     
     def decode_signal(self, za, zp):
         
@@ -182,8 +199,8 @@ class ISOVAE(nn.Module):
         z = torch.cat((za, zp), dim=-1)
         
         # get output of fully connected layers with ReLU activation
-        h1 = F.relu(self.decoder_signal_fc1(z))
-        h2 = F.relu(self.decoder_signal_fc2(h1))
+        h1 = torch.relu(self.decoder_signal_fc1(z))
+        h2 = torch.relu(self.decoder_signal_fc2(h1))
         
         # get final output
         out = self.decoder_signal_fc3(h2)
@@ -203,15 +220,18 @@ class ISOVAE(nn.Module):
         zp = self.sample_z(mu_p, logvar_p)
         
         # Decode amplitude
-        reconstructed_amp = self.decode_amplitude(za)
+        mask = self.decode_mask(za)
+        ahat = self.decode_amplitude(za)
         
         # Decode phase
-        reconstructed_phase = self.decode_phase(zp)
+        phat = self.decode_phase(zp)
         
         # Decode signal
-        reconstructed_x = self.decode_signal(za, zp)
+        # xhat = self.decode_signal(za, zp)
         
-        return reconstructed_x, reconstructed_amp, reconstructed_phase, mu_a, logvar_a, mu_p, logvar_p
+        # return ahat, phat, mu_a, logvar_a, mu_p, logvar_p
+        # return xhat, ahat, phat, mu_a, logvar_a, mu_p, logvar_p
+        return mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p
 
 # Define a dataset class for the calcium imaging data
 class CalciumDataset(Dataset):
@@ -274,27 +294,17 @@ def load_data(file_path):
     
     return data.values
 
-def num_freq_components(fs, N):
+def rfft_num_components(N):
     """
-    Computes the number of frequency components up to the Nyquist frequency (fs/2)
-    for a signal of length N sampled at frequency fs.
+    Returns the number of frequency components for the real FFT (rFFT).
 
     Args:
-        fs (float): Sampling frequency in Hz.
         N (int): Number of timepoints in the signal.
 
     Returns:
-        int: Number of frequency components up to fs/2.
-        float: Frequency resolution (Δf).
-        numpy.ndarray: Array of frequency bins up to fs/2.
+        int: Number of rFFT components.
     """
-    import numpy as np
-
-    num_components = N // 2  # Number of bins up to Nyquist frequency
-    delta_f = fs / N  # Frequency resolution
-    freq_bins = np.linspace(0, fs / 2, num_components)  # Frequency bins
-
-    return num_components, delta_f, freq_bins
+    return (N // 2) + 1
 
 def augment_data(data, N, L, seed=0):
     """
@@ -510,12 +520,11 @@ def loss_clavae(recon_x, x, mu, logvar, roi, **optional_args):
     return total_loss, recon_loss, kl_loss, pp_loss
 
 # Define a function to compute the total loss for the ISOVAE model
-def loss_isovae(xhat, x, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, **optional_args):
+def loss_isovae(x, mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, epoch, **optional_args):
     """
     Computes the total loss function for the ISOVAE.
     
     Args:
-        xhat (torch.Tensor): The reconstructed input.
         x (torch.Tensor): The original input.
         ahat (torch.Tensor): The reconstructed amplitude.
         phat (torch.Tensor): The reconstructed phase.
@@ -528,58 +537,99 @@ def loss_isovae(xhat, x, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, **optional_
         torch.Tensor: The computed total loss.
     """
     
+    # NOTE: consider the following:
+    # - Most frequencies have amplitude close to zero (very sparse)
+    # - Use LSTM in encoders, not in decoders
+    # - We could implicitly apply a low pass filter
+    # 
+    # DONE:
+    # - Reconstruction through iFFT
+    # - Use real FFT and iFFT to make code more efficient: no need for mask
+    # - Use cosine similarity for phase
+    # - Implemented KL annealing to avoid posterior collapse
+    # 
+    # TODO:
+    # - Solve posterior collapse leading to std posterior samples
+    # - Consider changing the prior of the angle to a uniform distribution?
+    # - Solve issue with mask decoder producing only zeros
+    # - Generalize scaling of ahat
+    
     # Extract optional arguments
-    fs = optional_args.get('fs', 20.0)
     bkl = optional_args.get('bkl', 1.0)
     rec_loss = optional_args.get('rec_loss', 'mae')
     
-    # NOTE: consider the following:
-    # - We could do the reconstruction of X doing the ifft of Ahat and Phat
-    # - We could implicitly apply a low pass filter - this could be problematic though
-    
-    # TODO:
-    # - Make code more efficient by precomputing the mask
-    
-    # Compute FFT of the original signal
-    fft_x = torch.fft.fft(x)
+    # Compute the FFT of the original real signal
+    fft_x = torch.fft.rfft(x)
     
     # get amplitudes and phases
     a = torch.abs(fft_x)
     p = torch.angle(fft_x)
+
+    # get a mask
+    a_mask = (a > 10).float()
     
-    # Compute the frequency bins
-    freq_bins = torch.fft.fftfreq(x.size(-1), d=1/fs)
+    # set a smaller than 1 to zero
+    a = a * a_mask
     
-    # Mask to keep only components with frequency at most fs/2
-    mask = (freq_bins >= 0) & (freq_bins <= fs/2)
+    # rescale to compare with decoders' output
+    a = a / 2500
+    p = (p + np.pi) / (2 * np.pi)
     
-    # Apply the mask to amplitude and phase
-    a = a[:, mask]
-    p = p[:, mask]
+    # # superprint the first 10 entries of a and p
+    # superprint(f"A values - Min: {a.min().item()}, Max: {a.max().item()}")
+    # superprint(f"P values - Min: {p.min().item()}, Max: {p.max().item()}")
+    # superprint(f"Ahat values - Min: {ahat.min().item()}, Max: {ahat.max().item()}")
+    # superprint(f"Phat values - Min: {phat.min().item()}, Max: {phat.max().item()}")
     
-    # Normalize amplitude to be between 0 and 1
-    a = (a - a.min()) / (a.max() - a.min())
+    # # super print mu_a and logvar_a (useful for debugging posterior collapse)
+    # superprint(f"Mu_a values - Min: {mu_a.min().item()}, Max: {mu_a.max().item()}")
+    # superprint(f"Logvar_a values - Min: {logvar_a.min().item()}, Max: {logvar_a.max().item()}")
+    # superprint(f"Mu_p values - Min: {mu_p.min().item()}, Max: {mu_p.max().item()}")
+    # superprint(f"Logvar_p values - Min: {logvar_p.min().item()}, Max: {logvar_p.max().item()}")
     
-    # Compute the reconstruction loss for the signal
-    recon_loss = reconstruction_loss(xhat, x, rec_loss) / x.size(0)
+    # apply mask to ahat
+    ahat = ahat * (mask > 0.5).float()
+    
+    # mask loss (low pass filter)
+    # mask_loss = torch.tensor(0)
+    mask_loss = F.binary_cross_entropy(mask, a_mask, reduction='mean')
     
     # Compute the reconstruction loss for the amplitude
-    recon_amp_loss = reconstruction_loss(ahat, a, 'mae') / x.size(0)
+    recon_amp_loss = torch.tensor(0)
+    # recon_amp_loss = F.smooth_l1_loss(ahat, a, reduction='mean')
+    # recon_amp_loss = reconstruction_loss(ahat, a, 'mae') / x.size(0)
     
     # Compute the reconstruction loss for the phase (cosine similarity)
-    recon_phase_loss = torch.mean(1 - torch.cos(p - phat)) / x.size(0)
+    recon_phase_loss = torch.tensor(0)
+    # dp = p - phat
+    # recon_phase_loss = torch.mean(1 - torch.cos((dp * 2 * np.pi) - np.pi)) / x.size(0)
+    
+    # rescale parameters for iFFT
+    ahat = 2500 * ahat
+    phat = (phat * 2 * np.pi) - np.pi
+    
+    # reconstruct signal with negative and positive frequencies
+    xhat = torch.fft.irfft(ahat * torch.exp(1j * phat), n=x.shape[1])
+    
+    # Compute the reconstruction loss for the signal
+    # recon_loss = torch.tensor(0)
+    recon_loss = reconstruction_loss(xhat, x, rec_loss) / x.size(0)
     
     # Compute the KL divergence loss for amplitude
-    kl_loss_a = bkl * kl_divergence_loss(mu_a, logvar_a) / x.size(0)
+    kl_loss_a = kl_divergence_loss(mu_a, logvar_a) / x.size(0)
     
     # Compute the KL divergence loss for phase
-    kl_loss_p = bkl * kl_divergence_loss(mu_p, logvar_p) / x.size(0)
+    kl_loss_p = kl_divergence_loss(mu_p, logvar_p) / x.size(0)
+    
+    # adjust bkl to avoid posterior collapse
+    bkl = min(bkl, (1+epoch) / 500)
+    # superprint(f"bkl: {bkl}")
     
     # Compute the total loss
-    total_loss = recon_loss + recon_amp_loss + recon_phase_loss + kl_loss_a + kl_loss_p
+    total_loss = recon_loss + recon_amp_loss + recon_phase_loss + bkl * kl_loss_a + bkl * kl_loss_p + mask_loss
     
     # Return the total loss and individual losses
-    return total_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p
+    return total_loss, mask_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p
 
 # Define a function to train the CLAVAE model
 def train_clavae(model, train_loader, optimizer, device, **optional_args):
@@ -649,7 +699,7 @@ def train_clavae(model, train_loader, optimizer, device, **optional_args):
     return train_loss / len(train_loader.dataset)
 
 # Define a function to train the IsoVAE model
-def train_isovae(model, train_loader, optimizer, device, **optional_args):
+def train_isovae(model, train_loader, optimizer, device, epoch, **optional_args):
     """
     Trains the IsoVAE model using the given data.
 
@@ -670,6 +720,7 @@ def train_isovae(model, train_loader, optimizer, device, **optional_args):
     train_loss = 0
     
     # Initialize variables to store individual losses
+    total_mask_loss = 0
     total_kl_loss_a = 0
     total_kl_loss_p = 0
     total_recon_loss = 0
@@ -686,11 +737,11 @@ def train_isovae(model, train_loader, optimizer, device, **optional_args):
         optimizer.zero_grad()
         
         # Perform a forward pass
-        recon_batch, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p = model(x)
+        mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p = model(x)
         
         # Compute the loss
-        tot_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p = loss_isovae(
-            recon_batch, x, recon_amp, recon_phase, mu_a, logvar_a, mu_p, logvar_p, **optional_args)
+        tot_loss, mask_loss, recon_loss, recon_amp_loss, recon_phase_loss, kl_loss_a, kl_loss_p = loss_isovae(
+            x, mask, ahat, phat, mu_a, logvar_a, mu_p, logvar_p, epoch, **optional_args)
         
         # Perform a backward pass
         tot_loss.backward()
@@ -703,21 +754,23 @@ def train_isovae(model, train_loader, optimizer, device, **optional_args):
         
         # Add the losses to the total losses
         train_loss += tot_loss.item()
+        total_mask_loss += mask_loss.item()
+        total_kl_loss_a += kl_loss_a.item()
+        total_kl_loss_p += kl_loss_p.item()
         total_recon_loss += recon_loss.item()
         total_recon_amp_loss += recon_amp_loss.item()
         total_recon_phase_loss += recon_phase_loss.item()
-        total_kl_loss_a += kl_loss_a.item()
-        total_kl_loss_p += kl_loss_p.item()
     
     # Calculate average losses
+    avg_kl_loss_a = total_kl_loss_a / len(train_loader.dataset)
+    avg_kl_loss_p = total_kl_loss_p / len(train_loader.dataset)
+    avg_mask_loss = total_mask_loss / len(train_loader.dataset)
     avg_recon_loss = total_recon_loss / len(train_loader.dataset)
     avg_recon_amp_loss = total_recon_amp_loss / len(train_loader.dataset)
     avg_recon_phase_loss = total_recon_phase_loss / len(train_loader.dataset)
-    avg_kl_loss_a = total_kl_loss_a / len(train_loader.dataset)
-    avg_kl_loss_p = total_kl_loss_p / len(train_loader.dataset)
     
     # Print average losses
-    superprint(f"L_rec: {avg_recon_loss:.6f} | L_rec_amp: {avg_recon_amp_loss:.6f} | L_rec_phase: {avg_recon_phase_loss:.6f} | L_kl_a: {avg_kl_loss_a:.6f} | L_kl_p: {avg_kl_loss_p:.6f}")
-        
+    superprint(f"L_rec: {avg_recon_loss:.6f} | L_mask: {avg_mask_loss:.6f} | L_rec_amp: {avg_recon_amp_loss:.6f} | L_rec_phase: {avg_recon_phase_loss:.6f} | L_kl_a: {avg_kl_loss_a:.6f} | L_kl_p: {avg_kl_loss_p:.6f}")
+    
     # Return the average training loss
     return train_loss / len(train_loader.dataset)

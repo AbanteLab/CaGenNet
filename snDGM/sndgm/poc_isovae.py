@@ -1,10 +1,8 @@
 #%%
-import pywt
 import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 
 #%%
 
@@ -71,60 +69,55 @@ plt.show()
 ## The real data can be well reconstructed using the FFT as well. This shows that we should
 ## be able to train a model that predicts the coefficients of the FFT and reconstruct the signal.
 
-fs = 20
-
 # input data
 xfile="/pool01/data/private/canals_lab/processed/calcium_imaging/hdrep/xf.csv.gz"
 
 # read in the real data
 x = pd.read_csv(xfile, header=None)
 
-# subset randomlly 10 rows
-xs = x.sample(10).to_numpy()
-
-# %%
+# get tensor
+x = torch.tensor(x.values, dtype=torch.float32)
 
 # do the FFT of each row
-x_fft = np.fft.fft(xs)
+x_fft = torch.fft.rfft(x)
 
 # get the amplitudes and phases
 a = np.abs(x_fft)
 p = np.angle(x_fft)
 
-# Compute the frequency bins
-freq_bins = torch.fft.fftfreq(xs.shape[1], d=1/fs)
-    
-# Mask to keep only components with frequency at most fs/2
-mask = (freq_bins >= 0) & (freq_bins <= fs/2)
+# range of amplitudes and phases
+print(f"Amplitude range: {a.min()} - {a.max()}")
+print(f"Phase range: {p.min()} - {p.max()}")
 
-# count how many positive frequencies we have
-n_pos_freqs = mask.sum()
-
-# plot spectrum of the first row
-plt.figure(figsize=(6, 3))
-plt.plot(frequencies, a[4])
-plt.xlim(-30, 30)
-plt.ylabel("Amplitude")
-plt.xlabel("Frequency (Hz)")
-plt.title("Amplitude Spectrum of the First Row")
+# plot histogram of amplitude and phase
+plt.figure(figsize=(12, 3))
+plt.subplot(1, 2, 1)
+plt.hist(a.flatten(), bins=100)
+plt.xlabel("Amplitude")
+plt.ylabel("Frequency")
+plt.title("Histogram of Amplitudes")
+plt.subplot(1, 2, 2)
+plt.hist(p.flatten(), bins=100)
+plt.xlabel("Phase")
+plt.ylabel("Frequency")
+plt.title("Histogram of Phases")
 plt.show()
 
-# apply low pass filter to all rows
-a[a < 10] = 0
+# %%
 
 # reconstruct the data
-x_reconstructed = np.real(np.fft.ifft(a * np.exp(1j * p)))
+x_reconstructed = torch.fft.irfft(a * np.exp(1j * p), n=x.shape[1])
 
 # plot the original and reconstructed data for each of the 10 cases separately using a facet wrap
 fig, axes = plt.subplots(5, 2, figsize=(12, 15))
 axes = axes.flatten()
 
 # Determine the common y-limits
-y_min = min(xs.min().min(), x_reconstructed.min().min())
-y_max = max(xs.max().max(), x_reconstructed.max().max())
+y_min = min(x.min().min(), x_reconstructed.min().min())
+y_max = max(x.max().max(), x_reconstructed.max().max())
 
 for i in range(10):
-    axes[i].plot(xs[i], label='Original')
+    axes[i].plot(x[i], label='Original')
     axes[i].plot(x_reconstructed[i], label='Reconstructed', linestyle='--')
     axes[i].set_ylabel("Amplitude")
     axes[i].set_xlabel("Time")
