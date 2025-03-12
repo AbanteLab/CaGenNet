@@ -73,33 +73,42 @@ def load_data(file_path):
     # Check if the file has 'csv' or 'csv.gz' in the suffix and use ',' as separator in that case
     if file_path.endswith('.csv') or file_path.endswith('.csv.gz'):
         superprint("Loading data from CSV file")
-        data = pd.read_csv(file_path, header=None, sep=',')
+        data = pd.read_csv(file_path, header=None, sep=',').astype(np.float32).values
+    elif file_path.endswith('.npy'):
+        superprint("Loading data from NPY file")
+        data = np.load(file_path).astype(np.float32)
     else:
         superprint("Loading data from TSV file")
-        data = pd.read_csv(file_path, header=None, sep='\t')
+        data = pd.read_csv(file_path, header=None, sep='\t').astype(np.float32).values
     
     # Convert to float32
-    data = data.astype(np.float32)
+    # data = data.astype(np.float32)
     
-    return data.values
+    return data
 
-def augment_data(data, N, L, seed=0):
+def augment_data(data, N, seed=0):
     """
-    Augments the input data by randomly choosing N different consecutive segments of length L for each row in the data.
+    Augments the input data by rolling the signal N times with evenly spaced increments.
     
     Args:
         data (numpy.ndarray): The original data.
-        N (int): The number of segments to choose.
-        L (int): The length of each segment.
+        N (int): The number of times to roll the signal.
+        seed (int): The random seed for reproducibility.
     
     Returns:
         numpy.ndarray: The augmented data.
-        numpy.ndarray: The indices of the chosen segments in the original data.
+        numpy.ndarray: The indices of the rolled positions.
     """
+    
+    # Set the random seed for reproducibility
+    np.random.seed(seed)
     
     # Initialize lists to store the indices and augmented data
     indices = []
     augmented_data = []
+    
+    # Calculate the increment for rolling
+    increment = data.shape[1] // N
     
     # Iterate over the rows in the data
     for row_idx, row in enumerate(data):
@@ -108,18 +117,18 @@ def augment_data(data, N, L, seed=0):
         row_indices = []
         row_augmented_data = []
         
-        # Iterate N times to choose N segments
-        for _ in range(N):
+        # Iterate N times to roll the signal
+        for i in range(N):
             
-            # Randomly choose a starting index
-            start_idx = np.random.randint(0, len(row) - L)
+            # Calculate the number of positions to roll
+            roll_positions = i * increment
             
-            # Extract the segment
-            segment = row[start_idx:start_idx + L]
+            # Roll the signal
+            rolled_row = np.roll(row, roll_positions)
             
-            # Append the segment and the starting index
-            row_augmented_data.append(segment)
-            row_indices.append(row_idx)
+            # Append the rolled signal and the roll positions
+            row_augmented_data.append(rolled_row)
+            row_indices.append(roll_positions)
         
         augmented_data.append(row_augmented_data)
         indices.append(row_indices)
@@ -128,7 +137,7 @@ def augment_data(data, N, L, seed=0):
     indices = np.array(indices)
     augmented_data = np.array(augmented_data)
     
-    return augmented_data,indices
+    return augmented_data, indices
 
 def normalize_data(data):
     """
@@ -413,3 +422,59 @@ def train_clavae(model, train_loader, optimizer, device, **optional_args):
         
     # Return the average training loss
     return train_loss / len(train_loader.dataset)
+
+# Define a function to dynamically adjust the KL divergence beta
+def kl_beta_schedule(epoch, num_epochs, start_beta=0.1, end_beta=2.0):
+    
+    beta = start_beta + (end_beta - start_beta) * (epoch / num_epochs)
+    return min(beta, end_beta)
+
+#########################################################################################################
+# Simulations
+#########################################################################################################
+
+def simulate_lognormal_amplitude(num_samples=8449, num_features=2500, num_archetypes=4, num_components=20, archetype_value=10, noise_mean=1, noise_std=0.1):
+    """
+    Simulates data by generating archetypes and adding noise.
+
+    Args:
+        num_samples (int): The number of samples to generate.
+        num_features (int): The number of features for each sample.
+        num_archetypes (int): The number of archetypes to generate.
+        num_components (int): The number of components to set to a specific value in each archetype.
+        archetype_value (float): The value to set for the selected components in each archetype.
+        noise_mean (float): The mean of the noise to add to the archetypes.
+        noise_std (float): The standard deviation of the noise to add to the archetypes.
+
+    Returns:
+        torch.Tensor: The simulated data.
+        torch.Tensor: The phase data.
+        list: The list of archetype indices used for each sample.
+    """
+    
+    # Generate archetypes
+    archetypes = []
+    for _ in range(num_archetypes):
+        base = np.random.lognormal(mean=1, sigma=1, size=num_features)
+        idx = np.random.choice(num_features, num_components, replace=False)
+        base[idx] = archetype_value
+        archetypes.append(base)
+    
+    # Sample vectors by picking one of the archetypes and adding noise
+    y = []
+    a = np.zeros((num_samples, num_features))
+    for i in range(num_samples):
+        idx = np.random.choice(num_archetypes)
+        archetype = archetypes[idx]
+        noise = np.random.normal(loc=noise_mean, scale=noise_std, size=(num_features,))
+        a[i] = archetype + noise
+        y.append(idx)
+    
+    # Ensure a is positive
+    a = np.abs(a)
+    
+    # Convert to tensor
+    a = torch.tensor(a, dtype=torch.float32)
+    p = torch.tensor(np.random.uniform(-np.pi, np.pi, size=(num_samples, num_features)), dtype=torch.float32)
+    
+    return a, p, y
