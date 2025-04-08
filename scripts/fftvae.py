@@ -25,15 +25,12 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 # Our modules
-from sndgm.utils import superprint, load_data
-from sndgm.models import AmpVAE, IcasspVAE, HierarchicalVAE, train_vae
+from ca_sn_gen_models.utils import superprint, load_data, train_svi
+from ca_sn_gen_models.models import AmpVAE, IcasspVAE, HierarchicalVAE
 
 # Detect device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 superprint(f"Using device: {device}")
-
-# TODO:
-# - A(f=0)=0?
 
 #########################################################################################################
 # ARGUMENTS
@@ -44,17 +41,19 @@ superprint(f"Using device: {device}")
 parser = argparse.ArgumentParser(description='FFT VAE')
 parser.add_argument('--seed', type=int, default=0, help='Random seed')
 parser.add_argument('--beta', type=float, default=0.25, help='KL divergence weight')
+parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for the optimizer')
+parser.add_argument('--outdir', type=str, default='./output', help='Folder to save output files')
 parser.add_argument('--latent_dim', type=int, default=10, help='Dimensionality of the latent space')
 parser.add_argument('--norm', type=str, default='log1p', choices=['log1p', 'std', 'scale', 'none'], help='norm method')
 parser.add_argument('--target_dist', type=str, default='Laplace', choices=['Exponential', 'Gamma', 'LogNormal', 'Weibull'], help='Target distribution for the VAE')
-parser.add_argument('--outdir', type=str, default='./output', help='Folder to save output files')
 
 args = parser.parse_args()
 
 # Summarize the options chosen
-superprint(f"Options chosen: seed={args.seed}, beta={args.beta}, norm={args.norm}, target_dist={args.target_dist}, outdir={args.outdir}")
+superprint(f"Options chosen: seed={args.seed}, beta={args.beta}, lr={args.lr}, norm={args.norm}, target_dist={args.target_dist}, outdir={args.outdir}")
 
 # set seed and norm
+lr = args.lr
 seed = args.seed
 beta = args.beta
 norm = args.norm
@@ -63,12 +62,13 @@ target_dist = getattr(dist, args.target_dist)
 
 # %%
 
-# if interactive
+# if interactive (do not comment out)
 # seed = 0
+# lr = 1e-3
 # beta = 0.1
 # norm = 'log1p'
 # latent_dim = 32
-# target_dist = dist.Weibull
+# target_dist = dist.LogNormal
 
 #########################################################################################################
 # Load and preprocess data
@@ -77,38 +77,54 @@ target_dist = getattr(dist, args.target_dist)
 
 # vars
 batch=512
-simulate=False
+simulate=True
 
 # Set the random seed for reproducibility
 np.random.seed(seed)
 
 if simulate:
     
-    # directories
-    data_dir = '/pool01/data/private/abante_lab/ca_img/sims_archetypes_hdrep/'
+    # # directories
+    # data_dir = '/pool01/data/private/abante_lab/ca_img/sims_archetypes_hdrep/'
 
-    # Load archetype labels
-    y = pd.read_csv(data_dir + 'y.csv').values.flatten().tolist()
+    # # Load archetype labels
+    # y = pd.read_csv(data_dir + 'y.csv').values.flatten().tolist()
     
-    # Load traces
-    x_dict = np.load(data_dir + 'x.npy', allow_pickle=True).item()
+    # # Load traces
+    # x_dict = np.load(data_dir + 'x.npy', allow_pickle=True).item()
     
-    # load amplitude and phase
-    a = torch.tensor(load_data(data_dir + 'a.npy'), dtype=torch.float32)
-    p = torch.tensor(load_data(data_dir + 'p.npy'), dtype=torch.float32)
+    # # load amplitude and phase
+    # a = torch.tensor(load_data(data_dir + 'a.npy'), dtype=torch.float32)
+    # p = torch.tensor(load_data(data_dir + 'p.npy'), dtype=torch.float32)
 
+    # # do real FFT of the data
+    # xfft = a * torch.exp(1j * p)
+    # x = torch.fft.irfft(xfft, n=2*a.shape[1])
+    
+    # Simulated data
+    x = torch.empty(0, 20001)
+    noise_level = 0.0
+    for group in [1,2,3]:
+        for sample in range(3):
+            data_path_sims = f'/pool01/projects/abante_lab/snDGM/sims_brb_spring_2025/fluo_seed_0_group_{group}_sigma_{noise_level}_sample_{sample}.tsv.gz'
+            data_sims = pd.read_csv(data_path_sims, sep='\t', header=None).values
+            x = torch.cat((x, torch.tensor(data_sims, dtype=torch.float32)), dim=0)
+    
     # do real FFT of the data
-    xfft = a * torch.exp(1j * p)
-    x = torch.fft.irfft(xfft, n=2*a.shape[1])
+    xfft = torch.fft.rfft(x, axis=1)
+
+    # get amplitude and phase
+    a = torch.abs(xfft)
+    p = torch.angle(xfft)
     
 else:
 
+    # Load and preprocess data
+    
     # path
     data_path = '/pool01/data/private/canals_lab/processed/calcium_imaging/hdrep/xf.csv.gz'
-
-    # Load and preprocess data
     x = torch.tensor(load_data(data_path), dtype=torch.float32)
-    
+
     # # repeat x to get 10 repetitions
     # xaug = np.repeat(x, 10, axis=0)
     
@@ -195,7 +211,7 @@ else:
 vae.to(device)
 
 # Define optimizer
-optimizer = ClippedAdam({"lr": 1e-4, "clip_norm": 2.0, "lrd": 0.999, "weight_decay": 1e-6})
+optimizer = ClippedAdam({"lr": lr, "clip_norm": 1.0, "lrd": 0.999, "weight_decay": 1e-6})
 
 # Use Pyro's Stochastic Variational Inference (SVI) for training
 svi = SVI(vae.model, vae.guide, optimizer, loss=Trace_ELBO())
@@ -213,7 +229,7 @@ training_params = {
 }
 
 # Call the function
-avg_train_loss_trail, avg_val_loss_trail = train_vae(vae, svi, train_loader, val_loader, **training_params)
+avg_train_loss_trail, avg_val_loss_trail = train_svi(vae, svi, train_loader, val_loader, **training_params)
 
 # plot training and validation loss
 plt.plot(range(len(avg_train_loss_trail)), avg_train_loss_trail, label='Train Loss')
@@ -392,7 +408,7 @@ plt.show()
 # %%
 
 # Determine the optimal number of clusters using the silhouette score
-best_n_clusters = 2
+best_n_clusters = 20
 silhouette_scores = []
 best_silhouette_score = -1
 range_n_clusters = list(range(2, 20))
@@ -482,6 +498,7 @@ results_df = pd.DataFrame({
     'seed': [seed],
     'norm': [norm],
     'beta': [beta],
+    'lr': [lr],
     'latent_dim': [latent_dim],
     'target_dist': [dist_name],
     'num_epochs': [len(avg_train_loss_trail)],

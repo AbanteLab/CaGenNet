@@ -13,7 +13,8 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
-from sndgm.utils import superprint, load_data, augment_data, normalize_data, VAE, train_clavae, loss_function
+from ca_sn_gen_models.xmodels import VAE, train_clavae, loss_function
+from ca_sn_gen_models.utils import superprint, load_data, augment_data, normalize_data
 
 ####################################################################################################
 # main

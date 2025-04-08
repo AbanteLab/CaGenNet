@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader,TensorDataset
 
-from sndgm.utils import (
+from ca_sn_gen_models.utils import (
     superprint, CalciumDataset, augment_data, normalize_data, VAE, train_clavae, reconstruction_loss, kl_divergence_loss, positive_pairwise_loss, loss_function, train_clavae
 )
 
