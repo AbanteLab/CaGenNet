@@ -32,7 +32,7 @@ We include various generative models for individual functional traces that **pri
 To install the package, clone the repository and run the following command in the project directory:
 
 ```bash
-pip install ./snDGM
+pip install ca_sn_gen_models
 ```
 
 Alternatively, you can install the required dependencies directly using:
@@ -40,15 +40,6 @@ Alternatively, you can install the required dependencies directly using:
 ```bash
 pip install -r requirements.txt
 ```
-
-## Usage
-To train the VAE model, you can run the `clavae.py` script with the necessary arguments. For example:
-
-```bash
-python clavae.py x --latent 32 --hidden 256 --epochs 50 --batch 16 --seed 0 --rate 0.001 --beta_kl 1 --retrain False --save True
-```
-
-where x needs to be a tsv or csv (compressed) file.
 
 ## Testing
 Unit tests for the package can be found in the `tests` directory. To run the tests, use the following command:
