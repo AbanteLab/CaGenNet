@@ -13,7 +13,8 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 # import all functions from utils.py
-from sndgm.utils import superprint, load_data, augment_data, normalize_data, VAE, train_clavae, loss_function
+from ca_sn_gen_models.xmodels import VAE, train_clavae, loss_function
+from ca_sn_gen_models.utils import superprint, load_data, augment_data, normalize_data
 
 ####################################################################################################
 # main
@@ -27,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a Variational Autoencoder (VAE) on calcium imaging data.")
     parser.add_argument('data_path', type=str, help='Path to the CSV file containing the data')
     parser.add_argument('--normalize', type=bool, default=False, help='Whether to normalize the data (default: False)')
+    parser.add_argument('--augment', type=bool, default=True, help='Whether to augment the data (default: True)')
     parser.add_argument('--retrain', type=bool, default=False, help='Whether to retrain the model (default: False)')
     parser.add_argument('--save', type=bool, default=True, help='Whether to save the model (default: True)')
     parser.add_argument('--model_type', type=str, choices=['avae', 'clavae'], default='clavae', help='Type of model to train (default: clavae)')
@@ -54,6 +56,7 @@ def main():
     seed = args.seed                # seed=0
     bkl = args.bkl                  # bkl=1
     broi = args.broi                # broi=10
+    augment = args.augment          # augment=True
     retrain = args.retrain          # retrain=True
     save = args.save                # save=False
     batch = args.batch              # batch=32
@@ -83,13 +86,12 @@ def main():
     data = load_data(data_path)
     
     # Augment the data if need be
-    if model_type == 'clavae':
-        superprint("Performing data augmentation for CLAVAE model")
+    if augment:
+        superprint("Performing data augmentation")
         reps = 10
-        length = 6000
-        data,idx = augment_data(data,reps,length, seed=seed)
+        data,idx = augment_data(data,reps, seed=seed)
     else:
-        superprint("AVAE model does not require data augmentation")
+        superprint("Skipping data augmentation")
         idx = np.arange(data.shape[0])
         
     # normalize the data
@@ -179,38 +181,6 @@ def main():
         os.makedirs(outdir, exist_ok=True)
         torch.save(model.state_dict(), os.path.join(outdir, "vae.pth"))
 
-    ## Save embeddings of centered interval
-    
-    # Load original data
-    superprint("Saving embeddings")
-    
-    if model_type=='clavae':
-        
-        # load and augment the data
-        reps = 10
-        length = 6000
-        fluo = load_data(data_path)
-        fluo,idx = augment_data(fluo,reps,length, seed=seed)
-        
-        # keep only the centered interval of the data with 5,000 points
-        num_cols = fluo.shape[1]
-        center_start = (num_cols - length) // 2
-        center_end = center_start + length
-        fluo = torch.tensor(fluo[:, center_start:center_end])
-        fluo = fluo.to(device)
-    
-        # Save embeddings to a txt.gz file
-        embeddings = model.encode(fluo)[0]
-        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
-        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
-        
-    else:
-        
-        # Save embeddings to a txt.gz file
-        embeddings = model.encode(data.to(device))[0]
-        embeddings_df = pd.DataFrame(embeddings.cpu().detach().numpy())
-        embeddings_df.to_csv(os.path.join(outdir, "embeddings.txt.gz"), sep='\t', index=False, header=False)
-        
     ## Save training and validation losses
     superprint("Saving training and validation losses")
     losses_df = pd.DataFrame({'train_loss': train_losses, 'val_loss': val_losses})
@@ -226,4 +196,3 @@ def main():
     
 if __name__ == "__main__":
     main()
-# %%
