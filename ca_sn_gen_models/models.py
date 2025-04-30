@@ -248,7 +248,7 @@ class Encoder(nn.Module):
             Passes the input data through the encoder network to produce the latent
             representation.
     """
-    def __init__(self, input_dim, latent_dim, enc_dims):
+    def __init__(self, input_dim, latent_dim, enc_dims, output=None):
         
         super().__init__()
         
@@ -259,7 +259,16 @@ class Encoder(nn.Module):
         
         layers.append(nn.Linear(enc_dims[-1], latent_dim))
 
-        self.net = nn.Sequential(*layers)
+        if output is None:
+            self.net = nn.Sequential(*layers)
+        elif output == "softplus":
+            self.net = nn.Sequential(*layers, nn.Softplus())
+        elif output == "sigmoid":
+            self.net = nn.Sequential(*layers, nn.Sigmoid())
+        elif output == "tanh":
+            self.net = nn.Sequential(*layers, nn.Tanh())
+        else:
+            raise ValueError("Output activation not recognized.")
         
     def forward(self, x):
         return self.net(x)
@@ -281,7 +290,6 @@ class Decoder(nn.Module):
             - None: No activation function is applied.
             - "softplus": Applies the Softplus activation function.
             - "sigmoid": Applies the Sigmoid activation function.
-            - "exponential": Applies the Exponential activation function.
             Defaults to None.
     Methods:
         forward(x):
@@ -302,12 +310,12 @@ class Decoder(nn.Module):
         
         if output is None:
             self.net = nn.Sequential(*layers)
-        elif output=="softplus":
+        elif output == "softplus":
             self.net = nn.Sequential(*layers, nn.Softplus())
-        elif output=="sigmoid":
+        elif output == "sigmoid":
             self.net = nn.Sequential(*layers, nn.Sigmoid())
-        elif output=="exponential":
-            self.net = nn.Sequential(*layers, nn.Lambda(lambda x: torch.exp(x)))
+        elif output == "tanh":
+            self.net = nn.Sequential(*layers, nn.Tanh())
         else:
             raise ValueError("Output activation not recognized.")
         
@@ -818,6 +826,206 @@ class isoFA(nn.Module):
 
         return Zx_loc, Zy_loc, Wy_loc, Wxy_loc, sigma_loc
 
+########################################################################################
+# Supervised generative model (inspired by Semi-supervised VAE)
+########################################################################################
+class supVAE(nn.Module):
+    def __init__(self, D, K, NS, device="cpu"):
+        
+        # Inherit from nn.Module
+        super().__init__()
+        
+        # Store variables
+        self.D = D
+        self.K = K
+        self.NS = NS
+        self.device = device
+        
+        # define encoder
+        # self.encoder_x = Encoder(D, D // 32, [D // 8, D // 16])
+        self.encoder_x = nn.LSTM(D, D // 32, batch_first=True, bidirectional=True, num_layers=2)
+        self.xy_to_emb = Encoder(2 * D // 32 + NS, K, [D // 64, D // 128])
+        self.emb_to_loc = Encoder(K, K, [K], output="tanh")
+        self.emb_to_scl = Encoder(K, K, [K], output="softplus")
+        
+        # define decoder
+        self.decoder_lstm = nn.LSTM(K + NS, D // 32, batch_first=True, bidirectional=True, num_layers=2)
+        self.decoder_fc = nn.Linear(D // 16, D)
+        
+        # Move model to device
+        self.to(self.device)
+                         
+    def encode(self, x, y):
+        """
+        Encodes the input data into a latent representation.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N, D].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Encoded latent representation of shape [N, K].
+        """
+        
+        # Process x through a separate encoder
+        # x_encoded = self.encoder_x(x)
+        
+        ## BiLSTM representation of sequence
+        _,(h,_) = self.encoder_x(x.unsqueeze(1))
+        h = h[2:4] # take the last two layers
+        x_encoded = torch.cat(h.unbind(0), dim=1) # concatenate the backward and forward
+        x_encoded = x_encoded.squeeze(0)
+        
+        # Combine the encoded representations (e.g., via concatenation or addition)
+        xy = torch.cat((x_encoded, y), dim=-1)
+        
+        # Process the combined representation through another encoder
+        combined_encoding = self.xy_to_emb(xy)
+        
+        # Compute the mean and scale of the latent representation
+        loc = self.emb_to_loc(combined_encoding)
+        scale = self.emb_to_scl(combined_encoding)
+        
+        return loc.to(self.device), scale.to(self.device)
+    
+    def decode(self, z, y):
+        """
+        Decodes the latent representation into the original data space.
+
+        Args:
+            z (torch.Tensor): Latent representation of shape [N, K].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Reconstructed data of shape [N, D].
+        """
+        
+        # Concatenate z and y
+        zy = torch.cat((z, y), dim=-1)
+        
+        # Decode the combined representation
+        # x_reconstructed = self.decoder(zy)
+        
+        # BiLSTM layer
+        _,(h,_) = self.decoder_lstm(zy.unsqueeze(1))
+        h = h[2:4] # take the last two layers
+        h = torch.cat(h.unbind(0), dim=1) # concatenate the backward and forward
+        
+        # linear layer
+        xhat = self.decoder_fc(h.squeeze(0))
+        
+        return xhat.to(self.device)
+    
+    def model(self, x, y):
+        """
+        Defines the generative model P(X | Z, W, sigma^2).
+        """
+
+        # register modules with pyro
+        pyro.module("decoder_lstm", self.decoder_lstm)
+        pyro.module("decoder_fc", self.decoder_fc)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # prior parameters for Z
+        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
+        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
+        
+        # Prior for latent variables Z
+        with pyro.plate("data", batch_size):
+            
+            # Standard normal prior for latent variables
+            z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior).to_event(1))
+            
+            # sample label
+            alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / (1.0 * self.NS)
+            y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
+            
+            # sample 
+            loc = self.decode(z, y)
+            pyro.sample("x", dist.Normal(loc, 1).to_event(1), obs=x)
+
+    def guide(self, x, y):
+        """
+        Defines the variational guide q(W, Z, sigma).
+        """
+        
+        # register modules with pyro
+        pyro.module("encoder_x", self.encoder_x)
+        pyro.module("xy_to_emb", self.xy_to_emb)
+        pyro.module("emb_to_loc", self.emb_to_loc)
+        pyro.module("emb_to_scl", self.emb_to_scl)
+        
+        # samples posterior
+        with pyro.plate("data"):
+
+            # sample z
+            loc, scale = self.encode(x, y)
+            pyro.sample("z", dist.Normal(loc, scale).to_event(1))
+
+    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=50, min_delta=1e-3):
+        
+        # Set model to training mode
+        self.train()
+
+        # Define optimizer and SVI
+        optimizer = ClippedAdam({"lr": lr})
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        
+        # Training loop
+        train_loss_history = []
+        val_loss_history = []
+        
+        # patience counter
+        patience_counter = 0
+        best_loss = float("inf")
+
+        # Train the model
+        for epoch in range(num_epochs):
+            
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            for batch in data_loader:
+                
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                
+                train_loss += svi.step(x_batch, y_batch) / x_batch.size(0)
+                
+            train_loss /= len(data_loader.dataset)
+            train_loss_history.append(train_loss)
+            
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    
+                    x_batch = batch[0].to(self.device)
+                    y_batch = batch[1].to(self.device)
+                
+                    val_loss += svi.evaluate_loss(x_batch, y_batch) / x_batch.size(0)
+                    
+            val_loss /= len(val_loader.dataset)
+            val_loss_history.append(val_loss)
+            
+            # Early stopping
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # return loss history
+        return train_loss_history,val_loss_history
+    
 ########################################################################################
 # Deep generative model frequency domain (Amplitude)
 ########################################################################################
