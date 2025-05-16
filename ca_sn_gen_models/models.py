@@ -830,7 +830,6 @@ class isoFA(nn.Module):
 # Deep Generative Model time domain (X)
 ###########################################################################################################
 
-# TODO: review model and guide
 class MlpVAE(nn.Module):
     """
     MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data.
@@ -867,24 +866,27 @@ class MlpVAE(nn.Module):
         self.encoder_mlp = nn.Sequential(
             nn.Linear(D, D // 2), nn.ReLU(),
             nn.Linear(D // 2, 4 * K), nn.ReLU(),
-            nn.Linear(4 * K, 2 * K), nn.ReLU()
+            nn.Linear(4 * K, 2 * K)
         )
-        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K), nn.Tanh())
+        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K))
         self.encoder_scl = nn.Sequential(nn.Linear(2 * K, K), nn.Softplus())
         
         # define decoder
         self.decoder_mlp = nn.Sequential(
             nn.Linear(K, D // 8), nn.ReLU(), 
             nn.Linear(D // 8, D // 4), nn.ReLU(),
-            nn.Linear(D // 4, D // 2), nn.ReLU()
+            nn.Linear(D // 4, D // 2)
             )
-        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D), nn.Tanh())
-        self.decoder_scl = nn.Sequential(nn.Linear(D // 2, D), nn.Softplus())
+        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
+        # self.decoder_scl = nn.Sequential(nn.Linear(D // 2, D), nn.Softplus())
         
         # Move model to device
         self.to(self.device)
 
     def encode(self, x):
+        
+        # replace nans with zeros if any
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Process the combined representation through the encoder network
         x = self.encoder_mlp(x)
@@ -904,18 +906,14 @@ class MlpVAE(nn.Module):
         # compute location [N, D]
         loc = self.decoder_loc(z)
         
-        # compute scale [N, D]
-        scl = torch.clamp(self.decoder_scl(z), min=1e-3)
-        
         # return the location and log scale
-        return loc, scl
+        return loc
     
     def model(self, x):
         
         # register modules with pyro
         pyro.module("decoder_mlp", self.decoder_mlp)
         pyro.module("decoder_loc", self.decoder_loc)
-        pyro.module("decoder_scl", self.decoder_scl)
         
         # Get the batch size from input x
         batch_size = x.shape[0]
@@ -933,11 +931,11 @@ class MlpVAE(nn.Module):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
             
             # parameters of posterior
-            loc,scl = self.decode(z)
+            loc = self.decode(z)
 
             with pyro.plate("obs_dim", self.D, dim=-1):
                 
-                pyro.sample("x", dist.Normal(loc, scl), obs=x)
+                pyro.sample("x", dist.NanMaskedNormal(loc, 1e-3), obs=x)
 
     def guide(self, x):
         
@@ -1206,19 +1204,18 @@ class supMlpVAE(nn.Module):
         self.encoder_mlp = nn.Sequential(
             nn.Linear(D + NS, (D + NS) // 2), nn.ReLU(),
             nn.Linear((D + NS) // 2, 4 * K), nn.ReLU(),
-            nn.Linear(4 * K, 2 * K), nn.ReLU()
+            nn.Linear(4 * K, 2 * K)
         )
-        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K), nn.Tanh())
+        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K))
         self.encoder_scl = nn.Sequential(nn.Linear(2 * K, K), nn.Softplus())
         
         # define decoder
         self.decoder_mlp = nn.Sequential(
             nn.Linear(K + NS, D // 8), nn.ReLU(), 
             nn.Linear(D // 8, D // 4), nn.ReLU(),
-            nn.Linear(D // 4, D // 2), nn.ReLU()
+            nn.Linear(D // 4, D // 2)
             )
-        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D), nn.Tanh())
-        self.decoder_scl = nn.Sequential(nn.Linear(D // 2, D), nn.Softplus())
+        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
         
         # Move model to device
         self.to(self.device)
@@ -1234,6 +1231,9 @@ class supMlpVAE(nn.Module):
         Returns:
             torch.Tensor: Encoded latent representation of shape [N, K].
         """
+        
+        # replace nans with zeros if any
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Combine the input data x and labels y
         xy = torch.cat((x, y), dim=-1)
@@ -1269,11 +1269,8 @@ class supMlpVAE(nn.Module):
         # compute location [N, D]
         loc = self.decoder_loc(zy)
         
-        # compute scale [N, D]
-        scl = torch.clamp(self.decoder_scl(zy), min=1e-3)
-        
         # return the location and log scale
-        return loc, scl
+        return loc
     
     def model(self, x, y):
         """
@@ -1283,7 +1280,6 @@ class supMlpVAE(nn.Module):
         # register modules with pyro
         pyro.module("decoder_mlp", self.decoder_mlp)
         pyro.module("decoder_loc", self.decoder_loc)
-        pyro.module("decoder_scl", self.decoder_scl)
         
         # Get the batch size from input x
         batch_size = x.shape[0]
@@ -1305,11 +1301,11 @@ class supMlpVAE(nn.Module):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
             
             # parameters of posterior
-            loc,scl = self.decode(z, y)
+            loc,scl = self.decode(z)
 
             with pyro.plate("obs_dim", self.D, dim=-1):
                 
-                pyro.sample("x", dist.Normal(loc, scl), obs=x)
+                pyro.sample("x", dist.NanMaskedNormal(loc, 1e-3), obs=x)
 
     def guide(self, x, y):
         """
