@@ -569,7 +569,6 @@ class FA(nn.Module):
 ########################################################################################
 # Generative model based on Exponential Family Factor Analysis (EFFA) with Zx and Zy
 ########################################################################################
-
 class CustomELBO(pyro.infer.Trace_ELBO):
     def __init__(self, lambda_reg=1e6, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -603,7 +602,7 @@ class CustomELBO(pyro.infer.Trace_ELBO):
         print(f"Orthogonality loss: {ortho_loss:.4f}")
         
         return loss + ortho_loss  # Retorna la pèrdua total
-
+    
 class isoFA(nn.Module):
     def __init__(self, D, K, NS, device="cpu"):
         
@@ -826,12 +825,13 @@ class isoFA(nn.Module):
 
         return Zx_loc, Zy_loc, Wy_loc, Wxy_loc, sigma_loc
 
-###########################################################################################################
-# Deep Generative Model time domain (X)
-###########################################################################################################
+############################################################################################################
+# Deep Generative Model for time domain data (X) based on MLP embeddings that fixes the output scale.
+############################################################################################################
 class FixedVarMlpVAE(nn.Module):
     """
-    MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data.
+    MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data that assumes a fixed
+    scale of the likelihood function p(x|z).
 
     This class implements a VAE with fully connected layers for both the encoder and decoder.
     The encoder maps input data to a latent space, and the decoder reconstructs the input from
@@ -1010,9 +1010,13 @@ class FixedVarMlpVAE(nn.Module):
         # return loss history
         return train_loss_history,val_loss_history
 
+############################################################################################################
+# Deep Generative Model for time domain data (X) based on MLP embeddings that learns the output scale.
+############################################################################################################
 class LearnedVarMlpVAE(nn.Module):
     """
-    MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data.
+    MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data that learns the
+    scale of the likelihood function p(x|z).
 
     This class implements a VAE with fully connected layers for both the encoder and decoder.
     The encoder maps input data to a latent space, and the decoder reconstructs the input from
@@ -1193,10 +1197,40 @@ class LearnedVarMlpVAE(nn.Module):
         # return loss history
         return train_loss_history,val_loss_history
 
-###########################################################################################################
-# Deep Generative Model time domain (X) based on LSTM embeddings
-###########################################################################################################
+############################################################################################################
+# Supervised Deep Generative Model for time domain data (X) based on LSTM embeddings that learns the 
+# output scale.
+############################################################################################################
 class LearnedVarLstmVAE(nn.Module):
+    """
+    Variational Autoencoder (VAE) with LSTM-based encoder and decoder for sequential data.
+    This model is designed for learning latent variable representations of time series data using a 
+    bidirectional LSTM encoder and LSTM-based decoder. The encoder maps input sequences to a latent 
+    space, parameterized by a mean and scale, while the decoder reconstructs the input from the latent 
+    variables. The model is compatible with Pyro for probabilistic modeling and variational inference.
+    Args:
+        D (int): Number of time steps in the input sequence.
+        K (int): Dimensionality of the latent variable space.
+        device (str, optional): Device to run the model on ('cpu' or 'cuda'). Default is 'cpu'.
+    Attributes:
+        D (int): Number of time steps.
+        K (int): Latent dimension.
+        device (str): Device for computation.
+        encoder_x (nn.LSTM): Bidirectional LSTM encoder for input sequences.
+        int_layer (nn.Sequential): Intermediate linear layer for encoder output.
+        emb_to_loc (nn.Sequential): Linear layer to compute latent mean.
+        emb_to_scl (nn.Sequential): Linear + Softplus layer to compute latent scale.
+        decoder_mlp (nn.Sequential): MLP to map latent variables to decoder input.
+        decoder_loc (nn.LSTM): LSTM decoder for reconstructing sequence mean.
+        decoder_scl (nn.LSTM): LSTM decoder for reconstructing sequence scale.
+        tanh (nn.Tanh): Tanh activation function.
+        softplus (nn.Softplus): Softplus activation function.
+    Methods:
+        encode(x): Encodes input sequence x into latent mean and scale.
+        decode(z): Decodes latent variable z into reconstructed sequence mean and scale.
+        model(x): Pyro model definition for variational inference.
+        guide(x): Pyro guide definition for variational inference.
+    """
     def __init__(self, D, K, device="cpu"):
         
         # Inherit from nn.Module
@@ -1368,10 +1402,40 @@ class LearnedVarLstmVAE(nn.Module):
         # return loss history
         return train_loss_history,val_loss_history
 
-########################################################################################
-# Supervised generative model (inspired by Semi-supervised VAE)
-########################################################################################
+############################################################################################################
+# Supervised Deep Generative Model for time domain data (X) based on MLP embeddings that fixes the 
+# output scale.
+############################################################################################################
 class FixedVarSupMlpVAE(nn.Module):
+    """
+    FixedVarSupMlpVAE is a supervised variational autoencoder (VAE) model with fixed variance, implemented using PyTorch and Pyro. 
+    It is designed for semi-supervised learning tasks where both input data and class labels are available. The model uses 
+    multi-layer perceptrons (MLPs) for both the encoder and decoder networks, and incorporates class label information 
+    via concatenation with the input and latent variables. The encoder maps input data and labels to a latent space, 
+    while the decoder reconstructs the input from the latent representation and labels. The model supports training 
+    with early stopping and tracks both training and validation loss histories.
+        D (int): Number of input features or time steps.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoded labels).
+        device (str, optional): Device to run the model on ('cpu' or 'cuda'). Default is 'cpu'.
+    Attributes:
+        D (int): Number of input features or time steps.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes.
+        device (str): Device used for computation.
+        encoder_mlp (nn.Sequential): Encoder MLP network.
+        encoder_loc (nn.Sequential): Network to compute mean of latent distribution.
+        encoder_scl (nn.Sequential): Network to compute scale of latent distribution.
+        decoder_mlp (nn.Sequential): Decoder MLP network.
+        decoder_loc (nn.Sequential): Network to compute reconstructed data mean.
+    Methods:
+        encode(x, y): Encodes input data and labels into latent mean and scale.
+        decode(z, y): Decodes latent variables and labels into reconstructed data.
+        model(x, y): Defines the generative model for Pyro.
+        guide(x, y): Defines the variational guide for Pyro.
+        train_model(data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3): 
+            Trains the model using SVI with early stopping and returns loss histories.
+    """
     def __init__(self, D, K, NS, device="cpu"):
         
         # Inherit from nn.Module
@@ -1575,8 +1639,45 @@ class FixedVarSupMlpVAE(nn.Module):
         
         # return loss history
         return train_loss_history,val_loss_history
-
+    
+############################################################################################################
+# Supervised Deep Generative Model for time domain data (X) based on MLP embeddings that learns the 
+# output scale.
+############################################################################################################
 class LearnedVarSupMlpVAE(nn.Module):
+    """
+    A supervised variational autoencoder (VAE) model with learned variance, implemented using multilayer 
+    perceptrons (MLPs) for both encoder and decoder networks. This model is designed for semi-supervised 
+    or supervised learning tasks where both input data and class labels are available. The encoder network
+    maps the concatenated input data and one-hot encoded labels into a latent space, parameterizing the mean
+    and scale of the latent distribution. The decoder reconstructs the input data from the latent 
+    representation and labels, also predicting the mean and scale of the output distribution.
+    
+    The model leverages Pyro for probabilistic modeling and inference, supporting stochastic variational 
+    inference (SVI) for training. It includes methods for encoding, decoding, defining the generative 
+    model and variational guide, and a training loop with early stopping.
+        D (int): Number of input features (time steps).
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoding).
+        device (str, optional): Device to run the model on ("cpu" or "cuda"). Default is "cpu".
+    Attributes:
+        D (int): Number of input features.
+        K (int): Latent dimension.
+        NS (int): Number of classes.
+        device (str): Device used for computation.
+        encoder_mlp (nn.Sequential): Encoder MLP network.
+        encoder_loc (nn.Sequential): Encoder network for latent mean.
+        encoder_scl (nn.Sequential): Encoder network for latent scale.
+        decoder_mlp (nn.Sequential): Decoder MLP network.
+        decoder_loc (nn.Sequential): Decoder network for output mean.
+        decoder_scl (nn.Sequential): Decoder network for output scale.
+    Methods:
+        encode(x, y): Encodes input data and labels into latent mean and scale.
+        decode(z, y): Decodes latent variables and labels into reconstructed data mean and scale.
+        model(x, y): Defines the generative model P(X | Z, Y) for Pyro.
+        guide(x, y): Defines the variational guide q(Z | X, Y) for Pyro.
+        train_model(data_loader, val_loader, num_epochs, lr, patience, min_delta): Trains the model using SVI with early stopping.
+    """
     def __init__(self, D, K, NS, device="cpu"):
         
         # Inherit from nn.Module
@@ -1663,7 +1764,7 @@ class LearnedVarSupMlpVAE(nn.Module):
     
     def model(self, x, y):
         """
-        Defines the generative model P(X | Z, W, sigma^2).
+        Defines the generative model P(X | Z,Y).
         """
 
         # register modules with pyro
@@ -1699,7 +1800,7 @@ class LearnedVarSupMlpVAE(nn.Module):
 
     def guide(self, x, y):
         """
-        Defines the variational guide q(W, Z, sigma).
+        Defines the variational guide q(Theta,Z | X,Y).
         """
         
         # register modules with pyro
@@ -1784,9 +1885,44 @@ class LearnedVarSupMlpVAE(nn.Module):
         return train_loss_history,val_loss_history
     
 ############################################################################################################
-# Deep Generative Model time domain (X) based on LSTM embeddings
+# Supervised Deep Generative Model for time domain data (X) based on LSTM embeddings
 ############################################################################################################
 class LearnedVarSupLstmVAE(nn.Module):
+    """
+    A supervised variational autoencoder (VAE) model with LSTM-based encoder and decoder
+    networks, designed for sequential data with class labels.
+
+    Attributes:
+        D (int): Number of input features or time steps in each sequence.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoded labels).
+        device (str): Device used for computation ('cpu' or 'cuda').
+        encoder_x (nn.LSTM): Bidirectional LSTM encoder for input sequences.
+        xy_to_emb (nn.Sequential): Linear layer to combine LSTM output and label embedding.
+        emb_to_loc (nn.Sequential): Linear layer to compute mean of latent distribution.
+        emb_to_scl (nn.Sequential): Linear + Softplus layer to compute scale of latent distribution.
+        decoder_mlp (nn.Sequential): MLP to map latent variables and labels to decoder input.
+        decoder_loc (nn.LSTM): LSTM decoder for reconstructing sequence mean.
+        decoder_scl (nn.LSTM): LSTM decoder for reconstructing sequence scale.
+        tanh (nn.Tanh): Tanh activation function.
+        softplus (nn.Softplus): Softplus activation function.
+
+    Input:
+        x (torch.Tensor): Input data of shape [N, D], where N is batch size and D is sequence length.
+        y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+    Output:
+        loc (torch.Tensor): Reconstructed sequence mean of shape [N, D].
+        scl (torch.Tensor): Reconstructed sequence scale (stddev) of shape [N, D].
+
+    The model learns a latent representation of input sequences conditioned on both the data and their associated
+    labels, enabling class-conditional generation and inference. The encoder utilizes a
+    bidirectional LSTM to capture temporal dependencies in the input, while the decoder
+    reconstructs the original sequence from the latent variables and class information
+    using a combination of MLP and LSTM layers. The model is compatible with Pyro for
+    probabilistic programming and supports training with stochastic variational inference
+    (SVI), including early stopping based on validation loss.
+    """
     def __init__(self, D, K, NS, device="cpu"):
         
         # Inherit from nn.Module
@@ -2006,7 +2142,42 @@ class LearnedVarSupLstmVAE(nn.Module):
 ########################################################################################
 # Deep generative model time domain for denoising and imputation
 ########################################################################################
-class supMlpDenVAE(nn.Module):
+class FixedVarSupMlpDenVAE(nn.Module):
+    """
+    FixedVarSupMlpDenVAE is a supervised variational autoencoder (VAE) model for denoising
+    and imputation with fixed variance, implemented using PyTorch and Pyro. This model is 
+    designed for semi-supervised learning tasks where both input data, class labels, and 
+    a mask indicating observed/missing values are available. The encoder uses multi-layer 
+    perceptrons (MLPs) to map masked input data, labels, and the mask itself to a latent 
+    space, parameterizing the mean and scale of the latent distribution. The decoder 
+    reconstructs the original input from the latent representation and labels.
+
+    Attributes:
+        D (int): Number of input features or time steps in each sequence.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoded labels).
+        device (str): Device used for computation ('cpu' or 'cuda').
+        encoder_mlp (nn.Sequential): Encoder MLP network for masked input, labels, and mask.
+        encoder_loc (nn.Sequential): Linear layer to compute mean of latent distribution.
+        encoder_scl (nn.Sequential): Linear + Softplus layer to compute scale of latent distribution.
+        decoder_mlp (nn.Sequential): MLP to map latent variables and labels to decoder input.
+        decoder_loc (nn.Sequential): Linear layer to reconstruct the sequence mean.
+
+    Input:
+        x (torch.Tensor): Input data of shape [N, D], where N is batch size and D is sequence length.
+        y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+        m (torch.Tensor): Mask tensor of shape [N, D], indicating observed (1) or missing (0) values.
+
+    Output:
+        loc (torch.Tensor): Reconstructed sequence mean of shape [N, D].
+
+    The model learns a latent representation of masked input sequences conditioned on both 
+    the data, their associated labels, and the mask, enabling class-conditional denoising 
+    and imputation. The encoder processes the masked input, labels, and mask, while the 
+    decoder reconstructs the original sequence from the latent variables and class information.
+    The model is compatible with Pyro for probabilistic programming and supports training with 
+    stochastic variational inference (SVI), including early stopping based on validation loss.
+    """
     def __init__(self, D, K, NS, device="cpu"):
         
         # Inherit from nn.Module
@@ -2053,6 +2224,7 @@ class supMlpDenVAE(nn.Module):
         # replace nans with zeros if any
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
+        # mask the input data
         x_masked = x * m
         
         # Combine the input data x and labels y
@@ -2094,7 +2266,7 @@ class supMlpDenVAE(nn.Module):
     
     def model(self, x, y, _):
         """
-        Defines the generative model P(X | Z, W, sigma^2).
+        Defines the generative model P(X | Z, Y).
         """
 
         # register modules with pyro
@@ -2129,7 +2301,7 @@ class supMlpDenVAE(nn.Module):
 
     def guide(self, x, y, m):
         """
-        Defines the variational guide q(W, Z, sigma).
+        Defines the variational guide q(Theta, Z | X, Y).
         """
         
         # register modules with pyro
@@ -2214,6 +2386,7 @@ class supMlpDenVAE(nn.Module):
         
         # return loss history
         return train_loss_history,val_loss_history
+
 ########################################################################################
 # Deep generative model frequency domain (Amplitude)
 ########################################################################################
