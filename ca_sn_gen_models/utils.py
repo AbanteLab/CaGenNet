@@ -340,3 +340,42 @@ def gram_schmidt(matrix):
         orthogonal_matrix[i] = vec / torch.norm(vec)
     
     return orthogonal_matrix
+
+def gen_random_mask(num_rows, num_cols, min_segments=1, max_segments=15, min_length=50, max_length=300):
+    """
+    Generates a random binary mask of shape (num_rows, num_cols). For each row, a random number of 
+    segments (between min_segments and max_segments) are set to 0, with random lengths (between 
+    min_length and max_length) and random start positions.
+
+    Args:
+        num_rows (int): Number of rows in the mask.
+        num_cols (int): Number of columns in the mask.
+        min_segments (int): Minimum number of segments per row.
+        max_segments (int): Maximum number of segments per row.
+        min_length (int): Minimum length of each segment.
+        max_length (int): Maximum length of each segment.
+
+    Returns:
+        torch.Tensor: A binary mask of shape (num_rows, num_cols).
+    """
+    # Initialize the mask with all ones
+    mask = torch.ones(num_rows, num_cols)
+    for i in range(num_rows):
+    
+        # Randomly choose the number of segments to mask in this row
+        m = np.random.randint(min_segments, max_segments + 1)
+    
+        # Randomly choose the lengths of each segment
+        lengths = np.random.randint(min_length, max_length + 1, size=m)
+        for j in range(m):
+    
+            # Ensure the segment fits within the row
+            if num_cols - lengths[j] > 0:
+    
+                # Randomly choose the start position for the segment
+                start = np.random.randint(0, num_cols - lengths[j])
+    
+                # Set the segment to zero (mask it)
+                mask[i, start:start + lengths[j]] = 0
+    
+    return mask

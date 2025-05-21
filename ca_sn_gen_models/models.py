@@ -3,9 +3,6 @@
 # torch
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import DataLoader, TensorDataset
 
 # pyro
 import pyro
@@ -14,8 +11,7 @@ from pyro.optim import ClippedAdam
 from pyro.infer import SVI, TraceMeanField_ELBO, Trace_ELBO
 
 # distributions
-from ca_sn_gen_models.dist import ZeroInflatedLogNormal
-from ca_sn_gen_models.utils import superprint, kl_beta_schedule, gram_schmidt
+from ca_sn_gen_models.utils import superprint, gen_random_mask
 
 ########################################################################################
 # Encoder and Decoder classes
@@ -2221,11 +2217,12 @@ class FixedVarSupMlpDenVAE(nn.Module):
             torch.Tensor: Encoded latent representation of shape [N, K].
         """
         
-        # replace nans with zeros if any
-        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-
         # mask the input data
         x_masked = x * m
+
+        # replace nans with zeros if any (ensures mask is 0 too when NaN in data)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        m = torch.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Combine the input data x and labels y
         xym = torch.cat((x_masked, y, m), dim=-1)
@@ -2240,7 +2237,7 @@ class FixedVarSupMlpDenVAE(nn.Module):
         # Return the mean and scale of the latent representation
         return loc, scale
     
-    def decode(self, z, y, _):
+    def decode(self, z, y):
         """
         Decodes the latent representation into the original data space.
 
@@ -2293,7 +2290,7 @@ class FixedVarSupMlpDenVAE(nn.Module):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
             
             # parameters of posterior
-            loc = self.decode(z,y, None)
+            loc = self.decode(z,y)
 
             with pyro.plate("obs_dim", self.D, dim=-1):
                 
@@ -2350,7 +2347,7 @@ class FixedVarSupMlpDenVAE(nn.Module):
                 
                 x_batch = batch[0].to(self.device)
                 y_batch = batch[1].to(self.device)
-                m_batch = batch[2].to(self.device)
+                m_batch = gen_random_mask(x_batch.shape[0],x_batch.shape[1]).to(self.device)
                 
                 train_loss += svi.step(x_batch, y_batch, m_batch) / x_batch.size(0)
                 
@@ -2365,7 +2362,7 @@ class FixedVarSupMlpDenVAE(nn.Module):
                     
                     x_batch = batch[0].to(self.device)
                     y_batch = batch[1].to(self.device)
-                    m_batch = batch[2].to(self.device)
+                    m_batch = gen_random_mask(x_batch.shape[0],x_batch.shape[1]).to(self.device)
                 
                     val_loss += svi.evaluate_loss(x_batch, y_batch, m_batch) / x_batch.size(0)
                     
