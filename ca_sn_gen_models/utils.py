@@ -340,35 +340,3 @@ def gram_schmidt(matrix):
         orthogonal_matrix[i] = vec / torch.norm(vec)
     
     return orthogonal_matrix
-
-# Define a function to find the optimal epsilon for DBSCAN clustering
-def find_optimal_epsilon(z, y):  
-    
-    ari = []
-    epsilons = [round(i, 2) for i in np.arange(0.05, 1.0, 0.05)]
-    
-    # loop through epsilons
-    for epsilon in epsilons:
-        
-        # DBSCAN clustering
-        clustering = DBSCAN(eps=epsilon, min_samples=20).fit(z) 
-
-        # Get cluster labels
-        clusters = clustering.labels_
-        
-        # Assign each noise point (-1) a unique cluster label
-        noise_indices = np.where(clusters == -1)[0]
-        for i, idx in enumerate(noise_indices):
-            clusters[idx] = max(clusters) + 1 + i
-        
-        # append adjusted rand index
-        ari.append(adjusted_rand_score(y, clusters))
-        
-    # get optimal eps
-    opt_eps = epsilons[ari.index(max(ari))]
-    
-    # fit dbscan with optimal eps
-    clustering = DBSCAN(eps=opt_eps, min_samples=20).fit(z)
-    clusters = clustering.labels_
-    
-    return clusters, opt_eps, max(ari)
