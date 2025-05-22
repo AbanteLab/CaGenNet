@@ -2162,10 +2162,9 @@ class FixedVarSupMlpDenVAE(nn.Module):
     Input:
         x (torch.Tensor): Input data of shape [N, D], where N is batch size and D is sequence length.
         y (torch.Tensor): One-hot encoded labels of shape [N, NS].
-        m (torch.Tensor): Mask tensor of shape [N, D], indicating observed (1) or missing (0) values.
 
     Output:
-        loc (torch.Tensor): Reconstructed sequence mean of shape [N, D].
+        loc (torch.Tensor): Reconstructed sequence location of shape [N, D].
 
     The model learns a latent representation of masked input sequences conditioned on both 
     the data, their associated labels, and the mask, enabling class-conditional denoising 
@@ -2295,6 +2294,256 @@ class FixedVarSupMlpDenVAE(nn.Module):
             with pyro.plate("obs_dim", self.D, dim=-1):
                 
                 pyro.sample("x", dist.NanMaskedNormal(loc, 1e-3), obs=x)
+
+    def guide(self, x, y, m):
+        """
+        Defines the variational guide q(Theta, Z | X, Y).
+        """
+        
+        # register modules with pyro
+        pyro.module("encoder_mlp", self.encoder_mlp)
+        pyro.module("encoder_loc", self.encoder_loc)
+        pyro.module("encoder_scl", self.encoder_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # get posterior parameters
+        loc, scl = self.encode(x, y, m)
+        
+        # samples posterior
+        with pyro.plate("data", batch_size, dim=-2):
+
+            with pyro.plate("latent_dim", self.K, dim=-1):
+            
+                # sample z
+                pyro.sample("z", dist.Normal(loc, scl))
+
+    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3):
+        
+        # Set model to training mode
+        self.train()
+
+        # Define optimizer and SVI
+        optimizer = ClippedAdam({"lr": lr})
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        
+        # Training loop
+        train_loss_history = []
+        val_loss_history = []
+        
+        # patience counter
+        patience_counter = 0
+        best_loss = float("inf")
+
+        # Train the model
+        for epoch in range(num_epochs):
+            
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            for batch in data_loader:
+                
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                m_batch = gen_random_mask(x_batch.shape[0],x_batch.shape[1]).to(self.device)
+                
+                train_loss += svi.step(x_batch, y_batch, m_batch) / x_batch.size(0)
+                
+            train_loss /= len(data_loader.dataset)
+            train_loss_history.append(train_loss)
+            
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    
+                    x_batch = batch[0].to(self.device)
+                    y_batch = batch[1].to(self.device)
+                    m_batch = gen_random_mask(x_batch.shape[0],x_batch.shape[1]).to(self.device)
+                
+                    val_loss += svi.evaluate_loss(x_batch, y_batch, m_batch) / x_batch.size(0)
+                    
+            val_loss /= len(val_loader.dataset)
+            val_loss_history.append(val_loss)
+            
+            # Early stopping
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # return loss history
+        return train_loss_history,val_loss_history
+
+class LearnedVarSupMlpDenVAE(nn.Module):
+    """
+    FixedVarSupMlpDenVAE is a supervised variational autoencoder (VAE) model for denoising
+    and imputation with fixed variance, implemented using PyTorch and Pyro. This model is 
+    designed for semi-supervised learning tasks where both input data, class labels, and 
+    a mask indicating observed/missing values are available. The encoder uses multi-layer 
+    perceptrons (MLPs) to map masked input data, labels, and the mask itself to a latent 
+    space, parameterizing the mean and scale of the latent distribution. The decoder 
+    reconstructs the original input from the latent representation and labels.
+
+    Attributes:
+        D (int): Number of input features or time steps in each sequence.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoded labels).
+        device (str): Device used for computation ('cpu' or 'cuda').
+        encoder_mlp (nn.Sequential): Encoder MLP network for masked input, labels, and mask.
+        encoder_loc (nn.Sequential): Linear layer to compute mean of latent distribution.
+        encoder_scl (nn.Sequential): Linear + Softplus layer to compute scale of latent distribution.
+        decoder_mlp (nn.Sequential): MLP to map latent variables and labels to decoder input.
+        decoder_loc (nn.Sequential): Linear layer to reconstruct the location of X|Z.
+        decoder_scl (nn.Sequential): Linear + Softplus layer to compute scale of X|Z.
+
+    Input:
+        x (torch.Tensor): Input data of shape [N, D], where N is batch size and D is sequence length.
+        y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+    Output:
+        loc (torch.Tensor): Reconstructed sequence location of shape [N, D].
+        scl (torch.Tensor): Reconstructed sequence scale of shape [N, D].      
+
+    The model learns a latent representation of masked input sequences conditioned on both 
+    the data, their associated labels, and the mask, enabling class-conditional denoising 
+    and imputation. The encoder processes the masked input, labels, and mask, while the 
+    decoder reconstructs the original sequence from the latent variables and class information.
+    The model is compatible with Pyro for probabilistic programming and supports training with 
+    stochastic variational inference (SVI), including early stopping based on validation loss.
+    """
+    def __init__(self, D, K, NS, device="cpu"):
+        
+        # Inherit from nn.Module
+        super().__init__()
+        
+        # Store variables
+        self.D = D              # number of time steps
+        self.K = K              # latent dimension
+        self.NS = NS            # number of classes
+        self.device = device
+        
+        # define encoder
+        self.encoder_mlp = nn.Sequential(
+            nn.Linear(2 * D + NS, (2 * D + NS) // 2), nn.ReLU(),
+            nn.Linear((2 * D + NS) // 2, 4 * K), nn.ReLU(),
+            nn.Linear(4 * K, 2 * K)
+        )
+        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K))
+        self.encoder_scl = nn.Sequential(nn.Linear(2 * K, K), nn.Softplus())
+        
+        # define decoder
+        self.decoder_mlp = nn.Sequential(
+            nn.Linear(K + NS, D // 8), nn.ReLU(), 
+            nn.Linear(D // 8, D // 4), nn.ReLU(),
+            nn.Linear(D // 4, D // 2)
+            )
+        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
+        self.decoder_scl = nn.Sequential(nn.Linear(D // 2, D), nn.Softplus())
+        
+        # Move model to device
+        self.to(self.device)
+
+    def encode(self, x, y, m):
+        """
+        Encodes the input data into a latent representation.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N, D].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Encoded latent representation of shape [N, K].
+        """
+        
+        # mask the input data
+        x_masked = x * m
+
+        # replace nans with zeros if any (ensures mask is 0 too when NaN in data)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        m = torch.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Combine the input data x and labels y
+        xym = torch.cat((x_masked, y, m), dim=-1)
+
+        # Process the combined representation through the encoder network
+        xy_emb = self.encoder_mlp(xym)
+        
+        # Compute the mean and scale of the latent representation
+        loc = self.encoder_loc(xy_emb)
+        scale = torch.clamp(self.encoder_scl(xy_emb), min=1e-3)
+        
+        # Return the mean and scale of the latent representation
+        return loc, scale
+    
+    def decode(self, z, y):
+        """
+        Decodes the latent representation into the original data space.
+
+        Args:
+            z (torch.Tensor): Latent representation of shape [N, K].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Reconstructed data of shape [N, D].
+        """
+        
+        # concatenate z [batch, K] and y [batch, NS] -> [batch, K + NS] 
+        zy = torch.cat((z, y), dim=-1)
+        
+        # run through MLP [N, D // 2]
+        zy = self.decoder_mlp(zy)
+        
+        # compute location [N, D]
+        loc = self.decoder_loc(zy)
+        scale = torch.clamp(self.decoder_scl(zy), min=1e-3)
+        
+        # return the location and log scale
+        return loc, scale
+    
+    def model(self, x, y, _):
+        """
+        Defines the generative model P(X | Z, Y).
+        """
+
+        # register modules with pyro
+        pyro.module("decoder_mlp", self.decoder_mlp)
+        pyro.module("decoder_loc", self.decoder_loc)
+        pyro.module("decoder_scl", self.decoder_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # prior parameters for Z
+        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
+        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
+        
+        # Prior for latent variables Z
+        with pyro.plate("data", batch_size, dim=-2):
+
+            # sample label
+            alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / (1.0 * self.NS)
+            y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
+            
+            with pyro.plate("latent_dim", self.K, dim=-1):
+
+                # Standard normal prior for latent variables
+                z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
+            
+            # parameters of posterior
+            loc, scl = self.decode(z,y)
+
+            with pyro.plate("obs_dim", self.D, dim=-1):
+                
+                pyro.sample("x", dist.NanMaskedNormal(loc, scl), obs=x)
 
     def guide(self, x, y, m):
         """
