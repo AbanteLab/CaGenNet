@@ -341,41 +341,56 @@ def gram_schmidt(matrix):
     
     return orthogonal_matrix
 
-def gen_random_mask(num_rows, num_cols, min_segments=1, max_segments=15, min_length=50, max_length=300):
+def gen_random_mask(n, m, min_seg=5, max_seg=15, masked_fraction=0.2):
     """
-    Generates a random binary mask of shape (num_rows, num_cols). For each row, a random number of 
-    segments (between min_segments and max_segments) are set to 0, with random lengths (between 
-    min_length and max_length) and random start positions.
-
+    Generates a random boolean mask matrix with missing segments distributed across each row. 
+    
+    This function creates a mask of shape (n, m) where a specified fraction of each row is set to False (masked/missing),
+    distributed in a number of contiguous segments. The number of segments per row is randomly chosen between `min_seg` and `max_seg`.
+    The length of each segment is determined such that the total number of masked elements per row matches the `masked_fraction`.
     Args:
-        num_rows (int): Number of rows in the mask.
-        num_cols (int): Number of columns in the mask.
-        min_segments (int): Minimum number of segments per row.
-        max_segments (int): Maximum number of segments per row.
-        min_length (int): Minimum length of each segment.
-        max_length (int): Maximum length of each segment.
-
+        n (int): Number of rows in the mask (e.g., number of samples or ROIs).
+        m (int): Number of columns in the mask (e.g., number of timepoints).
+        min_seg (int, optional): Minimum number of missing segments per row. Default is 5.
+        max_seg (int, optional): Maximum number of missing segments per row. Default is 15.
+        masked_fraction (float, optional): Fraction of each row to be masked (set to False). Must be between 0 and 1. Default is 0.2.
     Returns:
-        torch.Tensor: A binary mask of shape (num_rows, num_cols).
+        np.ndarray: A boolean mask of shape (n, m), where True indicates observed (unmasked) entries and False indicates masked (missing) entries.
+    Notes:
+        - The actual number of masked elements per row is approximately `masked_fraction * m`.
+        - The masked segments are distributed randomly but are contiguous within each segment.
+        - The function uses numpy for random number generation and array manipulation.
     """
-    # Initialize the mask with all ones
-    mask = torch.ones(num_rows, num_cols)
-    for i in range(num_rows):
     
-        # Randomly choose the number of segments to mask in this row
-        m = np.random.randint(min_segments, max_segments + 1)
+    # get number of missing timpoints per row
+    num_miss_tps = int(masked_fraction * m)
+
+    # Step 1: Generate number of segments per row from randint(1, max_num_miss_seg)
+    num_miss_seg = np.random.randint(min_seg, max_seg + 1)
+
+    # Step 2: initialize mask matrix
+    mask = np.ones((n, m), dtype=bool)
+
+    # get equally spaced start of segments
+    seg_st = np.linspace(0, m - m//num_miss_seg, num_miss_seg)
+
+    # sample random shift for each row
+    mask_shift = np.random.randint(0, (seg_st[1]-seg_st[0])//2, size=n)
+
+    for i in range(n):
+        
+        # allocate missing timepoints across segments for i-th roi
+        ith_seg_len = np.random.multinomial(num_miss_tps, [1/num_miss_seg]*num_miss_seg)
+        
+        # start of missing data intervals for i-th roi
+        ith_st = seg_st + mask_shift[i]
+
+        # define intervals
+        ith_int = [np.arange(ith_st[j], ith_st[j] + ith_seg_len[j], dtype=int) for j in range(num_miss_seg)]
+
+        ints = np.concatenate(ith_int)
     
-        # Randomly choose the lengths of each segment
-        lengths = np.random.randint(min_length, max_length + 1, size=m)
-        for j in range(m):
-    
-            # Ensure the segment fits within the row
-            if num_cols - lengths[j] > 0:
-    
-                # Randomly choose the start position for the segment
-                start = np.random.randint(0, num_cols - lengths[j])
-    
-                # Set the segment to zero (mask it)
-                mask[i, start:start + lengths[j]] = 0
+        # register i-th row mask
+        mask[i, ints] = 0
     
     return mask
