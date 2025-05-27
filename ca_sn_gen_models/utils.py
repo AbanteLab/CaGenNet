@@ -393,4 +393,50 @@ def gen_random_mask(n, m, min_seg=5, max_seg=15, masked_fraction=0.2):
         # register i-th row mask
         mask[i, ints] = 0
     
-    return mask
+    return torch.tensor(mask, dtype=torch.bool)
+
+def gen_tail_mask(n, m, group_labels, sample_labels, min_cut=0.05, max_cut=0.35):
+    rng = np.random.default_rng()  # Faster and preferred RNG
+    mask = np.ones((n, m), dtype=bool)
+
+    # Percentage mask for each sample of each group
+    perc = np.zeros((3, 3))  
+
+    # Number of samples to cut from each group
+    smpls_to_cut = [2, 3, 3]
+
+    # shuffle smpls_to_cut
+    rng.shuffle(smpls_to_cut)
+
+    for i in range(1, 4):
+        
+        # Select indices for group i (i = 1, 2, 3)
+        group_idx = np.where(group_labels == i)[0]
+        
+        # Select tow random samples from each group that will be cut 
+        rnd_smpls = rng.choice([0, 1, 2], size=smpls_to_cut[i - 1], replace=False)
+        
+        # cut each sample
+        for j in rnd_smpls:
+
+            # Select indices for sample j within group i
+            sample_idx = group_idx[sample_labels[group_idx] == j]
+            
+            # Randomly select a cut fraction between 0.05 and 0.35
+            cut_frac = rng.choice(np.arange(min_cut, max_cut, 0.05))
+
+            # number of tps to cut
+            cut = int(cut_frac * m)
+            
+            if cut > 0:  # avoid slicing issues if cut = 0
+
+                # Set the last 'cut' values to False in the mask for the selected samples
+                mask[sample_idx, -cut:] = False
+            
+            # save the cut fraction in the perc matrix
+            perc[i-1, j] = cut_frac
+
+    # Convert the mask to a PyTorch tensor
+    mask = torch.tensor(mask, dtype=torch.bool)
+
+    return mask, perc
