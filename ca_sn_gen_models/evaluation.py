@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.svm import SVC
 
 from scipy.stats import entropy
+from scipy.stats import chi2_contingency
 
 from sklearn.cluster import HDBSCAN,DBSCAN
 from sklearn.pipeline import make_pipeline
@@ -152,3 +153,57 @@ def find_optimal_dbscan_epsilon(z, y):
     clusters = clustering.labels_
     
     return clusters, opt_eps, max(ari)
+
+# k-nearest neighbor Batch Effect Test
+def kBET(embedding, batch_labels, k=20, alpha=0.05, n_tests=1000, seed=0):
+    """
+    Simple implementation of kBET.
+
+    Parameters:
+        embedding (np.ndarray): Latent space (n_samples, n_features)
+        batch_labels (array-like): Batch labels (n_samples,)
+        k (int): Number of neighbors to consider (default: 10)
+        alpha (float): Significance threshold for the chi-squared test (default: 0.05)
+        n_tests (int): Number of points to randomly evaluate
+        seed (int): Seed for reproducibility
+
+    Returns:
+        rejection_rate (float): Proportion of tests where the null hypothesis is rejected (i.e., poor batch mixing)
+    """
+    np.random.seed(seed)
+    n_samples = embedding.shape[0]
+    unique_batches, counts = np.unique(batch_labels, return_counts=True)
+    expected_freq = counts / counts.sum()
+
+    # kNN fit
+    knn = NearestNeighbors(n_neighbors=k + 1).fit(embedding)
+    _, neighbors = knn.kneighbors(embedding)
+    neighbors = neighbors[:, 1:]  # excloure el mateix punt
+
+    # Submostreig aleatori
+    indices = np.random.choice(n_samples, size=min(n_tests, n_samples), replace=False)
+
+    rejections = 0
+    for idx in indices:
+        neighbor_idxs = neighbors[idx]
+        neighbor_batches = batch_labels[neighbor_idxs]
+
+        observed = np.array([
+            np.sum(neighbor_batches == batch) for batch in unique_batches
+        ])
+
+        expected = expected_freq * k
+
+        # Comprovem que no hi hagi categories amb esperat 0
+        if np.any(expected == 0):
+            continue
+
+        try:
+            _, p_value = chi2_contingency([observed, expected])[:2]
+            if p_value < alpha:
+                rejections += 1
+        except ValueError:
+            continue  # Si falla el test, el saltem
+
+    rejection_rate = rejections / len(indices)
+    return rejection_rate
