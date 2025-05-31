@@ -1,19 +1,20 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='ca_sn_gen_models',
+    name='cagennet',
     version='0.1.0',
     author='Jordi Abante',
     author_email='jordi.abante@ub.edu',
-    description='A package with single-neuron generative models for calcium imaging data.',
+    description='Calcium Generative Networks (CaGenNet): a package with deep generative models for Ca imaging data.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/jordiabante/ca_sn_gen_models',
+    url='https://github.com/AbanteLab/CaGenNet',
     packages=find_packages(),
     install_requires=[
         'numpy',
         'pandas',
         'torch',
+        'pyro',
         'scikit-learn'
     ],
     classifiers=[

@@ -1,7 +1,7 @@
 # Generative Models for Ca imaging data
 
 ## Overview
-**calgenn*** is a Python package that implements various generative models for Ca imaging data, including various generative models that **primarily seeks to produce a useful latent representation of individual neurons for downstream tasks**. The package includes functionalities for model training, data processing, and evaluation.
+**CaGenNet** is a Python package that implements various generative models for Ca imaging data, including various generative models that **primarily seeks to produce a useful latent representation of individual neurons for downstream tasks**. The package includes functionalities for model training, data processing, and evaluation.
 
 ## Installation
 To install the package, clone the repository and run the following command in the project directory:
