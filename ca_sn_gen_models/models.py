@@ -822,7 +822,7 @@ class isoFA(nn.Module):
         return Zx_loc, Zy_loc, Wy_loc, Wxy_loc, sigma_loc
 
 ############################################################################################################
-# Deep Generative Model for time domain data (X) based on MLP embeddings that fixes the output scale.
+# Validated deep generative models for time-series data
 ############################################################################################################
 class FixedVarMlpVAE(nn.Module):
     """
@@ -852,6 +852,11 @@ class FixedVarMlpVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "FixedVarMlpVAE"
+        self.fix_scl = True
+        self.sup = False
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -1034,9 +1039,6 @@ class FixedVarMlpVAE(nn.Module):
         
         return z_loc, xhat
 
-############################################################################################################
-# Deep Generative Model for time domain data (X) based on MLP embeddings that learns the output scale.
-############################################################################################################
 class LearnedVarMlpVAE(nn.Module):
     """
     MlpVAE: A Multi-Layer Perceptron Variational Autoencoder (VAE) for time-series data that learns the
@@ -1065,6 +1067,11 @@ class LearnedVarMlpVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "LearnedVarMlpVAE"
+        self.fix_scl = False
+        self.sup = False
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -1242,236 +1249,6 @@ class LearnedVarMlpVAE(nn.Module):
         
         return z_loc, xhat
 
-############################################################################################################
-# Supervised Deep Generative Model for time domain data (X) based on LSTM embeddings that learns the 
-# output scale.
-############################################################################################################
-class LearnedVarLstmVAE(nn.Module):
-    """
-    Variational Autoencoder (VAE) with LSTM-based encoder and decoder for sequential data.
-    This model is designed for learning latent variable representations of time series data using a 
-    bidirectional LSTM encoder and LSTM-based decoder. The encoder maps input sequences to a latent 
-    space, parameterized by a mean and scale, while the decoder reconstructs the input from the latent 
-    variables. The model is compatible with Pyro for probabilistic modeling and variational inference.
-    Args:
-        D (int): Number of time steps in the input sequence.
-        K (int): Dimensionality of the latent variable space.
-        device (str, optional): Device to run the model on ('cpu' or 'cuda'). Default is 'cpu'.
-    Attributes:
-        D (int): Number of time steps.
-        K (int): Latent dimension.
-        device (str): Device for computation.
-        encoder_x (nn.LSTM): Bidirectional LSTM encoder for input sequences.
-        int_layer (nn.Sequential): Intermediate linear layer for encoder output.
-        emb_to_loc (nn.Sequential): Linear layer to compute latent mean.
-        emb_to_scl (nn.Sequential): Linear + Softplus layer to compute latent scale.
-        decoder_mlp (nn.Sequential): MLP to map latent variables to decoder input.
-        decoder_loc (nn.LSTM): LSTM decoder for reconstructing sequence mean.
-        decoder_scl (nn.LSTM): LSTM decoder for reconstructing sequence scale.
-        tanh (nn.Tanh): Tanh activation function.
-        softplus (nn.Softplus): Softplus activation function.
-    Methods:
-        encode(x): Encodes input sequence x into latent mean and scale.
-        decode(z): Decodes latent variable z into reconstructed sequence mean and scale.
-        model(x): Pyro model definition for variational inference.
-        guide(x): Pyro guide definition for variational inference.
-    """
-    def __init__(self, D, K, device="cpu"):
-        
-        # Inherit from nn.Module
-        super().__init__()
-        
-        # Store variables
-        self.D = D              # number of time steps
-        self.K = K              # latent dimension
-        self.device = device
-        
-        # Memory LSTM ∝ batch_size × seq_len × hidden_dim × num_layers × (2 if bidirectional)
-        
-        # define proper LSTM encoder
-        self.encoder_x = nn.LSTM(1, K, batch_first=True, bidirectional=True, num_layers=2)
-        self.int_layer = nn.Sequential(nn.Linear(2 * K, K))
-        self.emb_to_loc = nn.Sequential(nn.Linear(K, K))
-        self.emb_to_scl = nn.Sequential(nn.Linear(K, K), nn.Softplus())
-        
-        # define proper LSTM decoder
-        self.decoder_mlp = nn.Sequential(
-            nn.Linear(K, D // 8), nn.ReLU(), 
-            nn.Linear(D // 8, D // 4), nn.ReLU(),
-            nn.Linear(D // 4, D)
-            )
-        self.decoder_loc = nn.LSTM(1, 1, batch_first=True, bidirectional=False, num_layers=2)
-        self.decoder_scl = nn.LSTM(1, 1, batch_first=True, bidirectional=False, num_layers=2)
-        
-        # non-linear activation functions
-        self.tanh = nn.Tanh()
-        self.softplus = nn.Softplus()
-        
-        # Move model to device
-        self.to(self.device)
-
-    def encode(self, x):
-        
-        # BiLSTM representation of sequence [N, D, 1] -> [N, D, 2 * K]
-        _,(h,_) = self.encoder_x(x.unsqueeze(-1))
-        h = h[2:4].transpose(0, 1).reshape(x.shape[0], -1)
-        
-        # Process the LSTM embedding through another encoder
-        h = self.int_layer(h)
-        
-        # Compute the mean and scale of the latent representation
-        loc = self.emb_to_loc(h)
-        scl = self.emb_to_scl(h)
-        
-        # Return the mean and scale of the latent representation
-        return loc, scl
-    
-    def decode(self, z):
-        
-        batch_size = z.shape[0]
-        
-        # run through MLP [N, D, 1]
-        h = self.decoder_mlp(z).unsqueeze(-1)
-        
-        # run embedding through location biLSTM
-        loc,_ = self.decoder_loc(h)
-        
-        # run embedding through scale biLSTM
-        scl,_ = self.decoder_scl(h)
-        
-        # return the location and log scale
-        return loc.squeeze(-1),self.softplus(scl.squeeze(-1))
-    
-    def model(self, x):
-
-        # register modules with pyro
-        pyro.module("decoder_mlp", self.decoder_mlp)
-        pyro.module("decoder_loc", self.decoder_loc)
-        pyro.module("decoder_scl", self.decoder_scl)
-        
-        # Get the batch size from input x
-        batch_size = x.shape[0]
-
-        # prior parameters for Z
-        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
-        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
-        
-        # Prior for latent variables Z
-        with pyro.plate("data", batch_size, dim=-2):
-            
-            with pyro.plate("latent_dim", self.K, dim=-1):
-
-                # Standard normal prior for latent variables
-                z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
-            
-            # parameters of posterior
-            loc,scl = self.decode(z)
-
-            with pyro.plate("obs_dim", self.D, dim=-1):
-                
-                pyro.sample("x", dist.NanMaskedNormal(loc, scl), obs=x)
-
-    def guide(self, x):
-        
-        # register modules with pyro
-        pyro.module("encoder_x", self.encoder_x)
-        pyro.module("int_layer", self.int_layer)
-        pyro.module("emb_to_loc", self.emb_to_loc)
-        pyro.module("emb_to_scl", self.emb_to_scl)
-        
-        # Get the batch size from input x
-        batch_size = x.shape[0]
-
-        # get posterior parameters
-        loc, scl = self.encode(x)
-
-        # samples posterior
-        with pyro.plate("data", batch_size, dim=-2):
-
-            with pyro.plate("latent_dim", self.K, dim=-1):
-            
-                # sample z
-                pyro.sample("z", dist.Normal(loc, scl))
-
-    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3):
-        
-        # Set model to training mode
-        self.train()
-
-        # Define optimizer and SVI
-        optimizer = ClippedAdam({"lr": lr})
-        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
-        
-        # Training loop
-        train_loss_history = []
-        val_loss_history = []
-        
-        # patience counter
-        patience_counter = 0
-        best_loss = float("inf")
-
-        # Train the model
-        for epoch in range(num_epochs):
-            
-            # Training phase
-            self.train()
-            train_loss = 0.0
-            for batch in data_loader:
-                x_batch = batch[0].to(self.device)
-                train_loss += svi.step(x_batch) / x_batch.size(0)
-            train_loss /= len(data_loader.dataset)
-            train_loss_history.append(train_loss)
-            
-            # Validation phase
-            self.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    x_batch = batch[0].to(self.device)
-                    val_loss += svi.evaluate_loss(x_batch) / x_batch.size(0)
-            val_loss /= len(val_loader.dataset)
-            val_loss_history.append(val_loss)
-            
-            # Early stopping
-            if val_loss < best_loss - min_delta:
-                best_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                    break
-
-            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        
-        # return loss history
-        return train_loss_history,val_loss_history
-
-    def forward(self, loader):
-        """
-        Forward pass through the model for a given data loader.
-        
-        Args:
-            loader (DataLoader): DataLoader containing the input data.
-        
-        Returns:
-            tuple: (z_loc, xhat) where z_loc is the latent mean and xhat is the reconstructed output.
-        """
-        
-        self.eval()
-        
-        with torch.no_grad():
-            for batch in loader:
-                x_batch = batch[0].to(self.device)
-                z_loc, _ = self.encode(x_batch)
-                xhat, _ = self.decode(z_loc)
-        
-        return z_loc, xhat
-
-############################################################################################################
-# Supervised Deep Generative Model for time domain data (X) based on MLP embeddings that fixes the 
-# output scale.
-############################################################################################################
 class FixedVarSupMlpVAE(nn.Module):
     """
     FixedVarSupMlpVAE is a supervised variational autoencoder (VAE) model with fixed variance, implemented using PyTorch and Pyro. 
@@ -1507,6 +1284,11 @@ class FixedVarSupMlpVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "FixedVarSupMlpVAE"
+        self.fix_scl = True
+        self.sup = True
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -1776,6 +1558,11 @@ class LearnedVarSupMlpVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "LearnedVarSupMlpVAE"
+        self.fix_scl = False
+        self.sup = True
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -2004,8 +1791,235 @@ class LearnedVarSupMlpVAE(nn.Module):
         return z_loc, xhat
     
 ############################################################################################################
-# Supervised Deep Generative Model for time domain data (X) based on LSTM embeddings
+# Experimental models
 ############################################################################################################
+class LearnedVarLstmVAE(nn.Module):
+    """
+    Variational Autoencoder (VAE) with LSTM-based encoder and decoder for sequential data.
+    This model is designed for learning latent variable representations of time series data using a 
+    bidirectional LSTM encoder and LSTM-based decoder. The encoder maps input sequences to a latent 
+    space, parameterized by a mean and scale, while the decoder reconstructs the input from the latent 
+    variables. The model is compatible with Pyro for probabilistic modeling and variational inference.
+    Args:
+        D (int): Number of time steps in the input sequence.
+        K (int): Dimensionality of the latent variable space.
+        device (str, optional): Device to run the model on ('cpu' or 'cuda'). Default is 'cpu'.
+    Attributes:
+        D (int): Number of time steps.
+        K (int): Latent dimension.
+        device (str): Device for computation.
+        encoder_x (nn.LSTM): Bidirectional LSTM encoder for input sequences.
+        int_layer (nn.Sequential): Intermediate linear layer for encoder output.
+        emb_to_loc (nn.Sequential): Linear layer to compute latent mean.
+        emb_to_scl (nn.Sequential): Linear + Softplus layer to compute latent scale.
+        decoder_mlp (nn.Sequential): MLP to map latent variables to decoder input.
+        decoder_loc (nn.LSTM): LSTM decoder for reconstructing sequence mean.
+        decoder_scl (nn.LSTM): LSTM decoder for reconstructing sequence scale.
+        tanh (nn.Tanh): Tanh activation function.
+        softplus (nn.Softplus): Softplus activation function.
+    Methods:
+        encode(x): Encodes input sequence x into latent mean and scale.
+        decode(z): Decodes latent variable z into reconstructed sequence mean and scale.
+        model(x): Pyro model definition for variational inference.
+        guide(x): Pyro guide definition for variational inference.
+    """
+    def __init__(self, D, K, device="cpu"):
+        
+        # Inherit from nn.Module
+        super().__init__()
+        
+        # define properties of model
+        self.name = "LearnedVarLstmVAE"
+        self.fix_scl = False
+        self.sup = False
+
+        # Store variables
+        self.D = D              # number of time steps
+        self.K = K              # latent dimension
+        self.device = device
+        
+        # Memory LSTM ∝ batch_size × seq_len × hidden_dim × num_layers × (2 if bidirectional)
+        
+        # define proper LSTM encoder
+        self.encoder_x = nn.LSTM(1, K, batch_first=True, bidirectional=True, num_layers=2)
+        self.int_layer = nn.Sequential(nn.Linear(2 * K, K))
+        self.emb_to_loc = nn.Sequential(nn.Linear(K, K))
+        self.emb_to_scl = nn.Sequential(nn.Linear(K, K), nn.Softplus())
+        
+        # define proper LSTM decoder
+        self.decoder_mlp = nn.Sequential(
+            nn.Linear(K, D // 8), nn.ReLU(), 
+            nn.Linear(D // 8, D // 4), nn.ReLU(),
+            nn.Linear(D // 4, D)
+            )
+        self.decoder_loc = nn.LSTM(1, 1, batch_first=True, bidirectional=False, num_layers=2)
+        self.decoder_scl = nn.LSTM(1, 1, batch_first=True, bidirectional=False, num_layers=2)
+        
+        # non-linear activation functions
+        self.tanh = nn.Tanh()
+        self.softplus = nn.Softplus()
+        
+        # Move model to device
+        self.to(self.device)
+
+    def encode(self, x):
+        
+        # BiLSTM representation of sequence [N, D, 1] -> [N, D, 2 * K]
+        _,(h,_) = self.encoder_x(x.unsqueeze(-1))
+        h = h[2:4].transpose(0, 1).reshape(x.shape[0], -1)
+        
+        # Process the LSTM embedding through another encoder
+        h = self.int_layer(h)
+        
+        # Compute the mean and scale of the latent representation
+        loc = self.emb_to_loc(h)
+        scl = self.emb_to_scl(h)
+        
+        # Return the mean and scale of the latent representation
+        return loc, scl
+    
+    def decode(self, z):
+        
+        batch_size = z.shape[0]
+        
+        # run through MLP [N, D, 1]
+        h = self.decoder_mlp(z).unsqueeze(-1)
+        
+        # run embedding through location biLSTM
+        loc,_ = self.decoder_loc(h)
+        
+        # run embedding through scale biLSTM
+        scl,_ = self.decoder_scl(h)
+        
+        # return the location and log scale
+        return loc.squeeze(-1),self.softplus(scl.squeeze(-1))
+    
+    def model(self, x):
+
+        # register modules with pyro
+        pyro.module("decoder_mlp", self.decoder_mlp)
+        pyro.module("decoder_loc", self.decoder_loc)
+        pyro.module("decoder_scl", self.decoder_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # prior parameters for Z
+        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
+        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
+        
+        # Prior for latent variables Z
+        with pyro.plate("data", batch_size, dim=-2):
+            
+            with pyro.plate("latent_dim", self.K, dim=-1):
+
+                # Standard normal prior for latent variables
+                z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
+            
+            # parameters of posterior
+            loc,scl = self.decode(z)
+
+            with pyro.plate("obs_dim", self.D, dim=-1):
+                
+                pyro.sample("x", dist.NanMaskedNormal(loc, scl), obs=x)
+
+    def guide(self, x):
+        
+        # register modules with pyro
+        pyro.module("encoder_x", self.encoder_x)
+        pyro.module("int_layer", self.int_layer)
+        pyro.module("emb_to_loc", self.emb_to_loc)
+        pyro.module("emb_to_scl", self.emb_to_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # get posterior parameters
+        loc, scl = self.encode(x)
+
+        # samples posterior
+        with pyro.plate("data", batch_size, dim=-2):
+
+            with pyro.plate("latent_dim", self.K, dim=-1):
+            
+                # sample z
+                pyro.sample("z", dist.Normal(loc, scl))
+
+    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3):
+        
+        # Set model to training mode
+        self.train()
+
+        # Define optimizer and SVI
+        optimizer = ClippedAdam({"lr": lr})
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        
+        # Training loop
+        train_loss_history = []
+        val_loss_history = []
+        
+        # patience counter
+        patience_counter = 0
+        best_loss = float("inf")
+
+        # Train the model
+        for epoch in range(num_epochs):
+            
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            for batch in data_loader:
+                x_batch = batch[0].to(self.device)
+                train_loss += svi.step(x_batch) / x_batch.size(0)
+            train_loss /= len(data_loader.dataset)
+            train_loss_history.append(train_loss)
+            
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    x_batch = batch[0].to(self.device)
+                    val_loss += svi.evaluate_loss(x_batch) / x_batch.size(0)
+            val_loss /= len(val_loader.dataset)
+            val_loss_history.append(val_loss)
+            
+            # Early stopping
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # return loss history
+        return train_loss_history,val_loss_history
+
+    def forward(self, loader):
+        """
+        Forward pass through the model for a given data loader.
+        
+        Args:
+            loader (DataLoader): DataLoader containing the input data.
+        
+        Returns:
+            tuple: (z_loc, xhat) where z_loc is the latent mean and xhat is the reconstructed output.
+        """
+        
+        self.eval()
+        
+        with torch.no_grad():
+            for batch in loader:
+                x_batch = batch[0].to(self.device)
+                z_loc, _ = self.encode(x_batch)
+                xhat, _ = self.decode(z_loc)
+        
+        return z_loc, xhat
+    
 class LearnedVarSupLstmVAE(nn.Module):
     """
     A supervised variational autoencoder (VAE) model with LSTM-based encoder and decoder
@@ -2047,6 +2061,11 @@ class LearnedVarSupLstmVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "LearnedVarSupLstmVAE"
+        self.fix_scl = False
+        self.sup = True
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -2280,9 +2299,6 @@ class LearnedVarSupLstmVAE(nn.Module):
         
         return z_loc, xhat
     
-########################################################################################
-# Deep generative model time domain for denoising and imputation
-########################################################################################
 class FixedVarSupMlpDenVAE(nn.Module):
     """
     FixedVarSupMlpDenVAE is a supervised variational autoencoder (VAE) model for denoising
@@ -2323,6 +2339,11 @@ class FixedVarSupMlpDenVAE(nn.Module):
         # Inherit from nn.Module
         super().__init__()
         
+        # define properties of model
+        self.name = "FixedVarSupMlpDenVAE"
+        self.fix_scl = True
+        self.sup = True
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
@@ -2596,7 +2617,7 @@ class FixedVarSupMlpDenCensVAE(nn.Module):
         
         # Inherit from nn.Module
         super().__init__()
-        
+
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension

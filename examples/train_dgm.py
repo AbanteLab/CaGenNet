@@ -108,9 +108,7 @@ valid_models = [
     'FixedVarMlpVAE',
     'LearnedVarMlpVAE',
     'FixedVarSupMlpVAE',
-    'LearnedVarSupMlpVAE',
-    'FixedVarSupMlpDenVAE',
-    'LearnedVarSupMlpDenVAE'
+    'LearnedVarSupMlpVAE'
 ]
 
 parser.add_argument(
@@ -145,33 +143,15 @@ metadata_path = args.metadata
 if vae == 'FixedVarMlpVAE':
     from ca_sn_gen_models.models import FixedVarMlpVAE as vae_model
     supervised = False
-    out_var = 'Fixed'
-    mask = False
 elif vae == 'LearnedVarMlpVAE':
     from ca_sn_gen_models.models import LearnedVarMlpVAE as vae_model
     supervised = False
-    out_var = 'Learned'
-    mask = False
 elif vae == 'FixedVarSupMlpVAE':
     from ca_sn_gen_models.models import FixedVarSupMlpVAE as vae_model
     supervised = True
-    out_var = 'Fixed'
-    mask = False
 elif vae == 'LearnedVarSupMlpVAE':
     from ca_sn_gen_models.models import LearnedVarSupMlpVAE as vae_model
     supervised = True
-    out_var = 'Learned'
-    mask = False
-elif vae == 'FixedVarSupMlpDenVAE':
-    from ca_sn_gen_models.models import FixedVarSupMlpDenVAE as vae_model
-    supervised = True
-    out_var = 'Fixed'
-    mask = True
-elif vae == 'LearnedVarSupMlpDenVAE':
-    from ca_sn_gen_models.models import LearnedVarSupMlpDenVAE as vae_model
-    supervised = True
-    out_var = 'Learned'
-    mask = True
 else:
     raise ValueError(f"Model {vae} not recognized. Choose from {valid_models}.")
 
