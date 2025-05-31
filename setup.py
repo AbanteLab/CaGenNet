@@ -3,8 +3,8 @@ from setuptools import setup, find_packages
 setup(
     name='cagennet',
     version='0.1.0',
-    author='Jordi Abante',
-    author_email='jordi.abante@ub.edu',
+    author='Jordi Abante, Berta Ros',
+    author_email='jordi.abante@ub.edu, bertaros@ub.edu',
     description='Calcium Generative Networks (CaGenNet): a package with deep generative models for Ca imaging data.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
