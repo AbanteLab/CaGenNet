@@ -6,6 +6,7 @@ import torch.nn as nn
 
 # pyro
 import pyro
+import pyro.contrib.gp as gp
 import pyro.distributions as dist
 from pyro.optim import ClippedAdam
 from pyro.infer import SVI, TraceMeanField_ELBO, Trace_ELBO
@@ -3636,3 +3637,296 @@ class LearnedVarSupMlpDenVAE(nn.Module):
         
         # return loss history
         return train_loss_history,val_loss_history
+
+class FixedVarSupMlpGpVAE(nn.Module):
+
+    def __init__(self, D, K, NS, scl=1e-3, device="cpu"):
+        
+        # Inherit from nn.Module
+        super().__init__()
+        
+        # define properties of model
+        self.name = "FixedVarSupMlpGpVAE"
+        self.fix_scl = True
+        self.sup = True
+
+        # Store variables
+        self.D = D              # number of time steps
+        self.K = K              # latent dimension
+        self.NS = NS            # number of classes
+        self.scl = scl          # scale of the output distribution
+        self.device = device
+        
+        # define encoder
+        self.encoder_mlp = nn.Sequential(
+            nn.Linear(D + NS, (D + NS) // 2), nn.ReLU(),
+            nn.Linear((D + NS) // 2, 4 * K), nn.ReLU(),
+            nn.Linear(4 * K, 2 * K)
+        )
+        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K))
+        self.encoder_scl = nn.Sequential(nn.Linear(2 * K, K), nn.Softplus())
+        
+        # define decoder
+        self.decoder_mlp = nn.Sequential(
+            nn.Linear(K + NS, D // 8), nn.ReLU(), 
+            nn.Linear(D // 8, D // 4), nn.ReLU(),
+            nn.Linear(D // 4, D // 2)
+            )
+        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
+        
+        # Move model to device
+        self.to(self.device)
+
+    def encode(self, x, y):
+        """
+        Encodes the input data into a latent representation.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N, D].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Encoded latent representation of shape [N, K].
+        """
+        
+        # replace nans with zeros if any
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Combine the input data x and labels y
+        xy = torch.cat((x, y), dim=-1)
+        
+        # Process the combined representation through the encoder network
+        xy_emb = self.encoder_mlp(xy)
+        
+        # Compute the mean and scale of the latent representation
+        loc = self.encoder_loc(xy_emb)
+        scl = torch.clamp(self.encoder_scl(xy_emb), min=1e-3)
+        
+        # Return the mean and scale of the latent representation
+        return loc, scl
+    
+    def decode(self, z, y):
+        """
+        Decodes the latent representation into the original data space.
+
+        Args:
+            z (torch.Tensor): Latent representation of shape [N, K].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Reconstructed data of shape [N, D].
+        """
+        
+        # concatenate z [batch, K] and y [batch, NS] -> [batch, K + NS] 
+        zy = torch.cat((z, y), dim=-1)
+        
+        # run through MLP [N, D // 2]
+        zy = self.decoder_mlp(zy)
+        
+        # compute location [N, D]
+        loc = self.decoder_loc(zy)
+        
+        # return the location and log scale
+        return loc
+    
+    def model(self, x, y):
+        """
+        Defines the generative model P(X | Z, Y) with a Gaussian Process likelihood.
+        """
+
+        # Register decoder modules with pyro
+        pyro.module("decoder_mlp", self.decoder_mlp)
+        pyro.module("decoder_loc", self.decoder_loc)
+
+        batch_size = x.shape[0]
+
+        # Prior for latent variables Z
+        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
+        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
+
+        # GP kernel hyperparameters (fixed or learnable)
+        lengthscale = pyro.param("gp_lengthscale", torch.tensor(10.0, device=self.device), constraint=dist.constraints.positive)
+        variance = pyro.param("gp_variance", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
+        noise = self.scl if self.fix_scl else pyro.param("gp_noise", torch.tensor(self.scl, device=self.device), constraint=dist.constraints.positive)
+
+        # Frequency/time points for GP (assume evenly spaced)
+        t = torch.arange(self.D, device=self.device).float().unsqueeze(0)  # [1, D]
+
+        with pyro.plate("data", batch_size, dim=-2):
+            
+            # sample label
+            alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / float(self.NS)
+            y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
+
+            with pyro.plate("latent_dim", self.K, dim=-1):
+                z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
+
+            # Decoder output as GP mean
+            mean = self.decode(z, y)  # [batch, D]
+
+            ## TODO: fix pyro GP implementation for better performance
+            
+            # Use Pyro's SparseGPRegression for efficient GP likelihood
+            # Set up inducing points (here, use a subset of t or evenly spaced points)
+            num_inducing = min(32, self.D)
+            Xu = torch.linspace(0, self.D - 1, num_inducing, device=self.device).unsqueeze(-1)  # [M, 1]
+            X = t.T  # [D, 1]
+
+            # Define RBF kernel
+            kernel = gp.kernels.RBF(input_dim=1, variance=variance, lengthscale=lengthscale)
+
+            # Register a single GP model for all observations in the batch
+            # The GP model expects input shape [N*D, input_dim], so we stack batch and time dims
+            # Here, we use a batched GP model for efficiency
+
+            # Expand X to [batch_size * D, 1], y_obs to [batch_size * D, 1], mean to [batch_size * D, 1]
+            X_batch = X.repeat(batch_size, 1)  # [batch_size * D, 1]
+            y_obs_batch = x.reshape(-1, 1)     # [batch_size * D, 1]
+            mean_batch = mean.reshape(-1, 1)   # [batch_size * D, 1]
+
+            # Inducing points for the full batch
+            Xu_batch = Xu  # [M, 1]
+
+            # Use a single SparseGPRegression for the whole batch
+            # mean_function should return a tensor of shape [N, 1] for input X_ of shape [N, 1]
+            # Here, we assume mean_batch is aligned with X_batch, so we can use a lambda that returns the correct slice
+            sgp = gp.models.SparseGPRegression(
+                X_batch, y_obs_batch, kernel, Xu_batch,
+                noise=noise, mean_function=lambda X_: mean_batch
+            )
+            sgp.model()  # Registers the GP likelihood with Pyro
+
+            ## NOTE: torch implementation of GP kernel matrix not very optimal for large D
+
+            # # Compute GP kernel matrix (RBF)
+            # # K[i,j] = variance * exp(-0.5 * (t_i - t_j)^2 / lengthscale^2)
+            # diff = t.unsqueeze(-1) - t.unsqueeze(-2)  # [1, D, D]
+            # K = variance * torch.exp(-0.5 * (diff ** 2) / (lengthscale ** 2))  # [1, D, D]
+            # K = K + noise * torch.eye(self.D, device=self.device, dtype=t.dtype).unsqueeze(0)  # Add noise to diagonal
+
+            # # diff = t.unsqueeze(-1) - t.unsqueeze(-2)  # [1, D, D]
+            # # K = variance * torch.exp(-0.5 * (diff ** 2) / (lengthscale ** 2))  # [1, D, D]
+            # # # K = K.expand(batch_size, self.D, self.D)  # [batch, D, D]
+            # # K = K + noise * torch.eye(self.D, device=self.device).unsqueeze(0)  # Add noise to diagonal
+
+            # # Multivariate Normal likelihood for each batch element
+            # pyro.sample("x",dist.MultivariateNormal(mean, covariance_matrix=K),obs=x)
+
+            # for i in range(batch_size):
+            #     pyro.sample(
+            #         f"x_{i}",
+            #         dist.MultivariateNormal(mean[i], covariance_matrix=K[i]),
+            #         obs=x[i]
+            #     )
+
+    def guide(self, x, y):
+        """
+        Defines the variational guide q(W, Z, sigma).
+        """
+        
+        # register modules with pyro
+        pyro.module("encoder_mlp", self.encoder_mlp)
+        pyro.module("encoder_loc", self.encoder_loc)
+        pyro.module("encoder_scl", self.encoder_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # get posterior parameters
+        loc, scl = self.encode(x, y)
+        
+        # samples posterior
+        with pyro.plate("data", batch_size, dim=-2):
+
+            with pyro.plate("latent_dim", self.K, dim=-1):
+            
+                # sample z
+                pyro.sample("z", dist.Normal(loc, scl))
+
+    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3, roll=False):
+        
+        # Set model to training mode
+        self.train()
+
+        # Define optimizer and SVI
+        optimizer = ClippedAdam({"lr": lr})
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        
+        # Training loop
+        train_loss_history = []
+        val_loss_history = []
+        
+        # patience counter
+        patience_counter = 0
+        best_loss = float("inf")
+
+        # Train the model
+        for epoch in range(num_epochs):
+            
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            for batch in data_loader:
+                
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                
+                # apply random roll to x_batch
+                if roll:
+                    x_batch = torch.roll(x_batch, shifts=torch.randint(0, x_batch.size(1), (1,)).item(), dims=1)
+
+                train_loss += svi.step(x_batch, y_batch) / x_batch.size(0)
+                
+            train_loss /= len(data_loader.dataset)
+            train_loss_history.append(train_loss)
+            
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    
+                    x_batch = batch[0].to(self.device)
+                    y_batch = batch[1].to(self.device)
+
+                    val_loss += svi.evaluate_loss(x_batch, y_batch) / x_batch.size(0)
+                    
+            val_loss /= len(val_loader.dataset)
+            val_loss_history.append(val_loss)
+            
+            # Early stopping
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # return loss history
+        return train_loss_history,val_loss_history
+    
+    def forward(self, loader):
+        """
+        Forward pass through the model for a given data loader.
+        
+        Args:
+            loader (DataLoader): DataLoader containing the input data.
+        
+        Returns:
+            tuple: (z_loc, xhat) where z_loc is the latent mean and xhat is the reconstructed output.
+        """
+        
+        self.eval()
+        
+        with torch.no_grad():
+            for batch in loader:
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                z_loc, _ = self.encode(x_batch,y_batch)
+                xhat = self.decode(z_loc,y_batch)
+        
+        return z_loc, xhat
