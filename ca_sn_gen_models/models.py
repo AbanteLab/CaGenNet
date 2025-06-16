@@ -3,6 +3,7 @@
 # torch
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # pyro
 import pyro
@@ -3638,21 +3639,59 @@ class LearnedVarSupMlpDenVAE(nn.Module):
         # return loss history
         return train_loss_history,val_loss_history
 
-class FixedVarSupMlpGpVAE(nn.Module):
+class SupMlpGpVAE(nn.Module):
+    """
+    SupMlpGpVAE
+    A supervised Gaussian Process Variational Autoencoder (GP-VAE) with a fixed output variance and MLP-based encoder/decoder. 
+    This model combines the representational power of deep neural networks with the flexibility of Gaussian Processes, 
+    allowing for structured modeling of temporal or sequential data with class supervision. The encoder maps input data and 
+    class labels to a latent space, while the decoder reconstructs the data via a GP whose mean is parameterized by the 
+    latent variables and class labels. The model supports stochastic variational inference (SVI) for training and includes 
+    methods for encoding, decoding, GP prediction, and model training with early stopping.
+        D (int): Number of time steps (input dimension).
+        K (int): Latent dimension.
+        NS (int): Number of classes (for one-hot labels).
+        M (int, optional): Number of inducing points for the GP. Default is 50.
+        scl (float, optional): Fixed scale (variance) of the output distribution. Default is 1e-3.
+        device (str, optional): Device to run the model on ("cpu" or "cuda"). Default is "cpu".
+    Attributes:
+        name (str): Name of the model.
+        fix_scl (bool): Whether the output variance is fixed.
+        sup (bool): Whether the model is supervised.
+        D (int): Number of time steps.
+        K (int): Latent dimension.
+        M (int): Number of inducing points.
+        NS (int): Number of classes.
+        scl (float): Output distribution scale.
+        device (str): Device for computation.
+        encoder_mlp (nn.Sequential): MLP encoder network.
+        encoder_loc (nn.Sequential): Network for latent mean.
+        encoder_scl (nn.Sequential): Network for latent scale.
+        decoder_mlp (nn.Sequential): MLP decoder network.
+    Methods:
+        encode(x, y): Encodes input data and labels into latent mean and scale.
+        decode(z, y): Decodes latent variables and labels into GP mean at inducing points.
+        gp_predict(lengthscale, variance, gp_loc): Computes GP predictive mean and covariance.
+        model(x, y): Defines the generative model for Pyro SVI.
+        guide(x, y): Defines the variational guide for Pyro SVI.
+        train_model(data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3): Trains the model using SVI with early stopping.
+        forward(loader): Runs the model forward pass to obtain latent means and reconstructions.
+    """
 
-    def __init__(self, D, K, NS, scl=1e-3, device="cpu"):
+    def __init__(self, D, K, NS, M=50, scl=1e-3, device="cpu"):
         
         # Inherit from nn.Module
         super().__init__()
         
         # define properties of model
-        self.name = "FixedVarSupMlpGpVAE"
+        self.name = "SupMlpGpVAE"
         self.fix_scl = True
         self.sup = True
 
         # Store variables
         self.D = D              # number of time steps
         self.K = K              # latent dimension
+        self.M = M              # number of inducing points
         self.NS = NS            # number of classes
         self.scl = scl          # scale of the output distribution
         self.device = device
@@ -3668,25 +3707,26 @@ class FixedVarSupMlpGpVAE(nn.Module):
         
         # define decoder
         self.decoder_mlp = nn.Sequential(
-            nn.Linear(K + NS, D // 8), nn.ReLU(), 
-            nn.Linear(D // 8, D // 4), nn.ReLU(),
-            nn.Linear(D // 4, D // 2)
-            )
-        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
+            nn.Linear(K + NS, M // 4), nn.ReLU(), 
+            nn.Linear(M // 4, M // 2), nn.ReLU(),
+            nn.Linear(M // 2, M)
+        )
         
         # Move model to device
         self.to(self.device)
 
     def encode(self, x, y):
         """
-        Encodes the input data into a latent representation.
+        Encodes the input data and labels into a latent representation.
 
         Args:
             x (torch.Tensor): Input data of shape [N, D].
             y (torch.Tensor): One-hot encoded labels of shape [N, NS].
 
         Returns:
-            torch.Tensor: Encoded latent representation of shape [N, K].
+            tuple: (loc, scl)
+            loc (torch.Tensor): Mean of the latent distribution, shape [N, K].
+            scl (torch.Tensor): Scale (stddev) of the latent distribution, shape [N, K].
         """
         
         # replace nans with zeros if any
@@ -3707,51 +3747,95 @@ class FixedVarSupMlpGpVAE(nn.Module):
     
     def decode(self, z, y):
         """
-        Decodes the latent representation into the original data space.
+        Decodes the latent representation and class labels into the GP mean at the inducing points.
 
         Args:
             z (torch.Tensor): Latent representation of shape [N, K].
             y (torch.Tensor): One-hot encoded labels of shape [N, NS].
 
         Returns:
-            torch.Tensor: Reconstructed data of shape [N, D].
+            torch.Tensor: GP mean at the inducing points, shape [N, M].
         """
         
         # concatenate z [batch, K] and y [batch, NS] -> [batch, K + NS] 
         zy = torch.cat((z, y), dim=-1)
         
-        # run through MLP [N, D // 2]
-        zy = self.decoder_mlp(zy)
-        
-        # compute location [N, D]
-        loc = self.decoder_loc(zy)
-        
         # return the location and log scale
-        return loc
+        return self.decoder_mlp(zy)
+    
+    def gp_predict(self, lengthscale, variance, gp_loc):
+        """
+        Computes the predictive mean and covariance for the GP decoder.
+
+        Args:
+        lengthscale (torch.Tensor): GP lengthscale parameter (scalar tensor).
+        variance (torch.Tensor): GP variance parameter (scalar tensor).
+        gp_loc (torch.Tensor): Latent mean at inducing points, shape [batch_size, M].
+
+        Returns:
+        pred_mean (torch.Tensor): Predictive mean at all points, shape [batch_size, D].
+        cov (torch.Tensor): Predictive covariance diagonal, shape [D].
+        """
+
+        # Register inducing points Tu (assume evenly spaced)
+        T = torch.arange(self.D, device=self.device).float().unsqueeze(1)  # [D, 1]
+        Tu = torch.linspace(0, self.D - 1, self.M, device=self.device).unsqueeze(1)  # [M, 1]
+
+        # Compute covariance between inducing points: Kuu € [M, M]
+        diff_uu = Tu - Tu.T  # [M, M]
+        Kuu = variance * torch.exp(-0.5 * (diff_uu ** 2) / (lengthscale ** 2))
+        Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)  # jitter for stability
+
+        # Compute covariance between inducing points and full points: Kuf € [M, D]
+        diff_uf = Tu - T.T  # [M, D]
+        Kuf = variance * torch.exp(-0.5 * (diff_uf ** 2) / (lengthscale ** 2))  # [M, D]
+
+        # Compute covariance at full points: Kff € [D, D]
+        Kff_diag = variance * torch.ones(self.D, device=self.device)  # only diagonal needed
+
+        # Cholesky of Kuu
+        Luu = torch.linalg.cholesky(Kuu)  # [M, M]
+
+        # Compute gamma = Kuu^{-1} (mean_Tu) for all batch elements: [batch_size, M]
+        gamma = torch.cholesky_solve(gp_loc.unsqueeze(-1), Luu).squeeze(-1)  # [batch_size, M]
+
+        # Predictive mean at X for all batch elements: [batch_size, D]
+        loc = torch.matmul(gamma, Kuf)  # [batch_size, D]
+
+        # Compute predictive covariance (same for all batches): [D, D]
+        A = torch.cholesky_solve(Kuf, Luu)  # [M, D]
+        scl = Kff_diag - (Kuf.T @ A).diagonal()
+        scl = torch.clamp(scl, min=1e-4)
+
+        return loc, scl
     
     def model(self, x, y):
         """
         Defines the generative model P(X | Z, Y) with a Gaussian Process likelihood.
+
+        This method specifies the probabilistic generative process for the supervised GP-VAE model.
+        Given input data x and class labels y, it samples latent variables z from a standard normal prior,
+        decodes z and y to obtain the mean at the GP inducing points, and uses a Gaussian Process
+        to generate the observed data x with a learned kernel. The GP kernel hyperparameters
+        (lengthscale and variance) are learned as Pyro parameters. The likelihood is modeled as a
+        Normal distribution with mean and variance given by the GP predictive equations.
         """
 
         # Register decoder modules with pyro
         pyro.module("decoder_mlp", self.decoder_mlp)
-        pyro.module("decoder_loc", self.decoder_loc)
-
+        
+        # Get the batch size from input x
         batch_size = x.shape[0]
 
         # Prior for latent variables Z
         z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
         z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
 
-        # GP kernel hyperparameters (fixed or learnable)
+        # GP kernel hyperparameters (fixed). TODO: put a prior on these
         lengthscale = pyro.param("gp_lengthscale", torch.tensor(10.0, device=self.device), constraint=dist.constraints.positive)
         variance = pyro.param("gp_variance", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
-        noise = self.scl if self.fix_scl else pyro.param("gp_noise", torch.tensor(self.scl, device=self.device), constraint=dist.constraints.positive)
 
-        # Frequency/time points for GP (assume evenly spaced)
-        t = torch.arange(self.D, device=self.device).float().unsqueeze(0)  # [1, D]
-
+        # pyro sample statements
         with pyro.plate("data", batch_size, dim=-2):
             
             # sample label
@@ -3762,66 +3846,16 @@ class FixedVarSupMlpGpVAE(nn.Module):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
 
             # Decoder output as GP mean
-            mean = self.decode(z, y)  # [batch, D]
+            loc, scl = self.gp_predict(lengthscale, variance, self.decode(z, y))
 
-            ## TODO: fix pyro GP implementation for better performance
-            
-            # Use Pyro's SparseGPRegression for efficient GP likelihood
-            # Set up inducing points (here, use a subset of t or evenly spaced points)
-            num_inducing = min(32, self.D)
-            Xu = torch.linspace(0, self.D - 1, num_inducing, device=self.device).unsqueeze(-1)  # [M, 1]
-            X = t.T  # [D, 1]
-
-            # Define RBF kernel
-            kernel = gp.kernels.RBF(input_dim=1, variance=variance, lengthscale=lengthscale)
-
-            # Register a single GP model for all observations in the batch
-            # The GP model expects input shape [N*D, input_dim], so we stack batch and time dims
-            # Here, we use a batched GP model for efficiency
-
-            # Expand X to [batch_size * D, 1], y_obs to [batch_size * D, 1], mean to [batch_size * D, 1]
-            X_batch = X.repeat(batch_size, 1)  # [batch_size * D, 1]
-            y_obs_batch = x.reshape(-1, 1)     # [batch_size * D, 1]
-            mean_batch = mean.reshape(-1, 1)   # [batch_size * D, 1]
-
-            # Inducing points for the full batch
-            Xu_batch = Xu  # [M, 1]
-
-            # Use a single SparseGPRegression for the whole batch
-            # mean_function should return a tensor of shape [N, 1] for input X_ of shape [N, 1]
-            # Here, we assume mean_batch is aligned with X_batch, so we can use a lambda that returns the correct slice
-            sgp = gp.models.SparseGPRegression(
-                X_batch, y_obs_batch, kernel, Xu_batch,
-                noise=noise, mean_function=lambda X_: mean_batch
-            )
-            sgp.model()  # Registers the GP likelihood with Pyro
-
-            ## NOTE: torch implementation of GP kernel matrix not very optimal for large D
-
-            # # Compute GP kernel matrix (RBF)
-            # # K[i,j] = variance * exp(-0.5 * (t_i - t_j)^2 / lengthscale^2)
-            # diff = t.unsqueeze(-1) - t.unsqueeze(-2)  # [1, D, D]
-            # K = variance * torch.exp(-0.5 * (diff ** 2) / (lengthscale ** 2))  # [1, D, D]
-            # K = K + noise * torch.eye(self.D, device=self.device, dtype=t.dtype).unsqueeze(0)  # Add noise to diagonal
-
-            # # diff = t.unsqueeze(-1) - t.unsqueeze(-2)  # [1, D, D]
-            # # K = variance * torch.exp(-0.5 * (diff ** 2) / (lengthscale ** 2))  # [1, D, D]
-            # # # K = K.expand(batch_size, self.D, self.D)  # [batch, D, D]
-            # # K = K + noise * torch.eye(self.D, device=self.device).unsqueeze(0)  # Add noise to diagonal
-
-            # # Multivariate Normal likelihood for each batch element
-            # pyro.sample("x",dist.MultivariateNormal(mean, covariance_matrix=K),obs=x)
-
-            # for i in range(batch_size):
-            #     pyro.sample(
-            #         f"x_{i}",
-            #         dist.MultivariateNormal(mean[i], covariance_matrix=K[i]),
-            #         obs=x[i]
-            #     )
+            with pyro.plate("output_dim", self.D, dim=-1):
+                
+                # sample the output x from a Normal distribution
+                pyro.sample("x", dist.NanMaskedNormal(loc, scl.sqrt()), obs=x)
 
     def guide(self, x, y):
         """
-        Defines the variational guide q(W, Z, sigma).
+        Defines the variational guide q(z | x, y) for the supervised GP-VAE.
         """
         
         # register modules with pyro
@@ -3844,6 +3878,21 @@ class FixedVarSupMlpGpVAE(nn.Module):
                 pyro.sample("z", dist.Normal(loc, scl))
 
     def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3, roll=False):
+        """
+        Trains the model using stochastic variational inference (SVI). This method performs model training over a specified number of epochs, using the provided training and validation data loaders.
+        It supports early stopping based on validation loss improvements. The training and validation loss histories are returned for further analysis.
+        Args:
+            data_loader (torch.utils.data.DataLoader): DataLoader for the training dataset.
+            val_loader (torch.utils.data.DataLoader): DataLoader for the validation dataset.
+            num_epochs (int, optional): Maximum number of training epochs. Default is 5000.
+            lr (float, optional): Learning rate for the optimizer. Default is 1e-3.
+            patience (int, optional): Number of epochs to wait for improvement in validation loss before early stopping. Default is 100.
+            min_delta (float, optional): Minimum change in validation loss to qualify as an improvement. Default is 1e-3.
+        Returns:
+            tuple: A tuple containing two lists:
+                - train_loss_history (list of float): Training loss values for each epoch.
+                - val_loss_history (list of float): Validation loss values for each epoch.
+        """
         
         # Set model to training mode
         self.train()
@@ -3912,21 +3961,43 @@ class FixedVarSupMlpGpVAE(nn.Module):
     def forward(self, loader):
         """
         Forward pass through the model for a given data loader.
-        
+
         Args:
             loader (DataLoader): DataLoader containing the input data.
-        
+
         Returns:
             tuple: (z_loc, xhat) where z_loc is the latent mean and xhat is the reconstructed output.
         """
         
         self.eval()
-        
+
+        # Initialize lists to store outputs
+        xhat_lst = []
+        z_loc_lst = []
+
+        # GP kernel hyperparameters
+        lengthscale = pyro.param("gp_lengthscale", torch.tensor(10.0, device=self.device), constraint=dist.constraints.positive)
+        variance = pyro.param("gp_variance", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
+
+        # Iterate through the data loader
         with torch.no_grad():
             for batch in loader:
+
+                # Move batch to device
                 x_batch = batch[0].to(self.device)
                 y_batch = batch[1].to(self.device)
-                z_loc, _ = self.encode(x_batch,y_batch)
-                xhat = self.decode(z_loc,y_batch)
-        
+
+                # run forward pass
+                z_loc_batch, _ = self.encode(x_batch, y_batch)
+                xhat_batch, _ = self.gp_predict(lengthscale, variance, self.decode(z_loc_batch, y_batch))
+
+                # Append outputs to lists
+                z_loc_lst.append(z_loc_batch)
+                xhat_lst.append(xhat_batch)
+
+        # Concatenate the outputs from all batches
+        z_loc = torch.cat(z_loc_lst, dim=0)
+        xhat = torch.cat(xhat_lst, dim=0)
+
+        # Return the latent mean and reconstructed output
         return z_loc, xhat
