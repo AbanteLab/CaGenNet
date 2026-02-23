@@ -19,6 +19,13 @@ import pyro.distributions as dist
 from pyro.optim import ClippedAdam
 from pyro.infer import SVI, Trace_ELBO, TraceMeanField_ELBO
 
+def running_in_ipython():
+    try:
+        get_ipython   # type: ignore
+        return True
+    except NameError:
+        return False
+
 # Define a function to print messages with timestamps
 def superprint(message):
     

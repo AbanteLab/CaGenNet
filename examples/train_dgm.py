@@ -20,7 +20,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 
 # Our modules
-from ca_sn_gen_models.utils import superprint
+from ca_sn_gen_models.utils import superprint, running_in_ipython
 
 # Detect device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,109 +31,122 @@ superprint(f"Using device: {device}")
 ###############################################################################################
 #%%
 
-# Create the parser
-parser = argparse.ArgumentParser(description="Training script for DGM models on Ca imaging data.")
+if running_in_ipython():
+    # Set default values for arguments when running in an interactive environment
+    data_dir = './input_data'
+    metadata_path = './metadata.csv'
+    latent_dim = 100
+    num_epochs = 5000
+    seed = 0
+    lr = 1e-4
+    batch_size = 20000
+    outdir = './output'
+    vae = 'FixedVarMlpVAE'
+    
+else:
+    # Create the parser
+    parser = argparse.ArgumentParser(description="Training script for DGM models on Ca imaging data.")
 
-# required arguments
-parser.add_argument(
-    '--indir',
-    type=str,
-    required=True,
-    help='Input directory containing input CSV files'
-)
+    # required arguments
+    parser.add_argument(
+        '--indir',
+        type=str,
+        required=True,
+        help='Input directory containing input CSV files'
+    )
 
-parser.add_argument(
-    '--metadata',
-    type=str,
-    required=True,
-    help='Path to the metadata file'
-)
+    parser.add_argument(
+        '--metadata',
+        type=str,
+        required=True,
+        help='Path to the metadata file'
+    )
 
-# optional arguments
-parser.add_argument(
-    "-l",
-    "--latent_dim", 
-    type=int,
-    required=False,
-    default=100,
-    help="Dimension of latent space (default: 100)"
-)
+    # optional arguments
+    parser.add_argument(
+        "-l",
+        "--latent_dim", 
+        type=int,
+        required=False,
+        default=100,
+        help="Dimension of latent space (default: 100)"
+    )
 
-parser.add_argument(
-    "-e",
-    "--num_epochs", 
-    type=int, 
-    required=False,
-    default=5000,
-    help="Dimension of latent space (default: 5000)"
-)
+    parser.add_argument(
+        "-e",
+        "--num_epochs", 
+        type=int, 
+        required=False,
+        default=5000,
+        help="Dimension of latent space (default: 5000)"
+    )
 
-parser.add_argument(
-    "-s",
-    "--seed", 
-    type=int, 
-    required=False, 
-    default=0,
-    help="RNG seed (default: 0)"
-)
+    parser.add_argument(
+        "-s",
+        "--seed", 
+        type=int, 
+        required=False, 
+        default=0,
+        help="RNG seed (default: 0)"
+    )
 
-parser.add_argument(
-    "-r",
-    "--rate", 
-    type=float, 
-    required=False, 
-    default=1e-4,
-    help="Learning rate (default: 1e-4)"
-)
+    parser.add_argument(
+        "-r",
+        "--rate", 
+        type=float, 
+        required=False, 
+        default=1e-4,
+        help="Learning rate (default: 1e-4)"
+    )
 
-parser.add_argument(
-    "-b",
-    "--batch_size", 
-    type=int, 
-    required=False, 
-    default=20000,
-    help="Batch size for training (default: 20000)"
-)
+    parser.add_argument(
+        "-b",
+        "--batch_size", 
+        type=int, 
+        required=False, 
+        default=20000,
+        help="Batch size for training (default: 20000)"
+    )
 
-parser.add_argument(
-    '--outdir', 
-    type=str, 
-    required=False,
-    default='./output', 
-    help='Folder to save output files'
-)
+    parser.add_argument(
+        '--outdir', 
+        type=str, 
+        required=False,
+        default='./output', 
+        help='Folder to save output files'
+    )
 
-# valid model
-valid_models = [
-    'FixedVarMlpVAE',
-    'LearnedVarMlpVAE',
-    'FixedVarSupMlpVAE',
-    'LearnedVarSupMlpVAE'
-]
+    # valid model
+    valid_models = [
+        'FixedVarMlpVAE',
+        'LearnedVarMlpVAE',
+        'FixedVarSupMlpVAE',
+        'LearnedVarSupMlpVAE'
+    ]
 
-parser.add_argument(
-    '--vae', 
-    type=str, 
-    required=False,
-    default='FixedVarMlpVAE',
-    choices=valid_models,
-    help='Model to use (default: FixedVarMlpVAE). Options: ' + ', '.join(valid_models)
-)
+    parser.add_argument(
+        '--vae', 
+        type=str, 
+        required=False,
+        default='FixedVarMlpVAE',
+        choices=valid_models,
+        help='Model to use (default: FixedVarMlpVAE). Options: ' + ', '.join(valid_models)
+    )
 
-# Parse the arguments
-args = parser.parse_args()
+    # Parse the arguments
+    args = parser.parse_args()
 
-# Access the arguments
-vae = args.vae
-lr = args.rate
-seed = args.seed
-outdir = args.outdir
-data_dir = args.indir
-batch_size = args.batch_size
-num_epochs = args.num_epochs
-fluo_noise = args.fluo_noise
-latent_dim = args.latent_dim
-metadata_path = args.metadata
+    # Access the arguments
+    vae = args.vae
+    lr = args.rate
+    seed = args.seed
+    outdir = args.outdir
+    data_dir = args.indir
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
+    fluo_noise = args.fluo_noise
+    latent_dim = args.latent_dim
+    metadata_path = args.metadata
 
 ###############################################################################################
 # import model
@@ -152,6 +165,10 @@ elif vae == 'FixedVarSupMlpVAE':
 elif vae == 'LearnedVarSupMlpVAE':
     from ca_sn_gen_models.models import LearnedVarSupMlpVAE as vae_model
     supervised = True
+elif vae == 'SupMlpGpVAE':
+    from ca_sn_gen_models.models import SupMlpGpVAE as vae_model
+    supervised = True
+    num_ind_pts = 500  # number of inducing points for the GP
 else:
     raise ValueError(f"Model {vae} not recognized. Choose from {valid_models}.")
 
@@ -264,9 +281,12 @@ model_path = f'{outdir}/parameters_{suffix}.pt'
 # init model
 superprint(f'Initializing model {vae} with latent dimension {latent_dim}...')
 if supervised:
-    
-    # Initialize model with num_classes
-    model = vae_model(data.shape[1], latent_dim, num_classes, device=device)
+    if vae == 'SupMlpGpVAE':
+        # Initialize model with num_classes
+        model = vae_model(data.shape[1], latent_dim, num_ind_pts, num_classes, device=device)
+    else:
+        # Initialize model with num_classes
+        model = vae_model(data.shape[1], latent_dim, num_classes, device=device)
 
 else:
     
