@@ -4039,17 +4039,6 @@ class SupMlpGpVAE(nn.Module):
         
         # return the location and log scale
         return self.decoder_mlp(zy)
-    
-    def matern32(self, diff, lengthscale, variance):
-        r = torch.abs(diff) / lengthscale
-        return variance * (1.0 + torch.sqrt(torch.tensor(3.0)) * r) * \
-            torch.exp(-torch.sqrt(torch.tensor(3.0)) * r)
-
-    def matern52(self, diff, lengthscale, variance):
-        r = torch.abs(diff) / lengthscale
-        sqrt5 = torch.sqrt(torch.tensor(5.0))
-        return variance * (1.0 + sqrt5 * r + 5.0 * r**2 / 3.0) * \
-            torch.exp(-sqrt5 * r)
         
     def gp_predict(self, lengthscale, variance, gp_loc):
         """
@@ -4071,18 +4060,12 @@ class SupMlpGpVAE(nn.Module):
 
         # Compute covariance between inducing points: Kuu € [M, M]
         diff_uu = Tu - Tu.T  # [M, M]
-            # --- Matérn kernel ---
-        Kuu = self.matern32(diff_uu, lengthscale, variance)
-        Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)
-
-        # Kuu = variance * torch.exp(-0.5 * (diff_uu ** 2) / (lengthscale ** 2))
-        # Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)  # jitter for stability
+        Kuu = variance * torch.exp(-0.5 * (diff_uu ** 2) / (lengthscale ** 2))
+        Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)  # jitter for stability
 
         # Compute covariance between inducing points and full points: Kuf € [M, D]
         diff_uf = Tu - T.T  # [M, D]
-        # --- Matérn kernel ---
-        Kuf = self.matern32(diff_uf, lengthscale, variance)
-        # Kuf = variance * torch.exp(-0.5 * (diff_uf ** 2) / (lengthscale ** 2))  # [M, D]
+        Kuf = variance * torch.exp(-0.5 * (diff_uf ** 2) / (lengthscale ** 2))  # [M, D]
 
         # Compute covariance at full points: Kff € [D, D]
         Kff_diag = variance * torch.ones(self.D, device=self.device)  # only diagonal needed
