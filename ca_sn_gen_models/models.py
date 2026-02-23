@@ -4253,11 +4253,6 @@ class SupMlpGpVAE(nn.Module):
                     y_batch = batch[1].to(self.device)
 
                     val_loss += svi.evaluate_loss(x_batch, y_batch) / x_batch.size(0)
-                    # val_likelihood += self.get_likelihood(x_batch, y_batch) / x_batch.size(0)
-                    # print("Size val_ll ", val_likelihood.size())
-                    # print('x_batch size ', x_batch.size())
-                    # print('y_batch size ', y_batch.size())
-                    # print('val_loss size ', val_loss.size())
 
             val_loss /= len(val_loader.dataset)
             val_loss_history.append(val_loss)
@@ -4276,9 +4271,7 @@ class SupMlpGpVAE(nn.Module):
                     break
 
             superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Likelihood: {val_likelihood:.4f}")
-
-            # superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Kernel Lengthscale: {pyro.get_param_store().get_param('gp_lengthscale').item():.4f}, Kernel Variance: {pyro.get_param_store().get_param('gp_variance').item():.4f}")
-
+            
         # return loss history
         return train_loss_history, val_loss_history
     
