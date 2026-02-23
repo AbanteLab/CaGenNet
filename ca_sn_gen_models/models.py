@@ -1,7 +1,7 @@
 # Description: Pyro models for the snDGM and VAE models.
 
 # torch
-from statistics import variance
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -560,7 +560,7 @@ class FA(nn.Module):
         Returns:
             tuple: Posterior of Z (torch.Tensor), W (torch.Tensor), and sigma (torch.Tensor).
         """
-        print(self.parameters())
+        superprint(str(list(self.parameters())))
         self.eval()
         with torch.no_grad():
             Z_loc = pyro.param("Z_loc").cpu().detach().numpy()
@@ -4155,10 +4155,6 @@ class SupMlpGpVAE(nn.Module):
             with pyro.plate("latent_dim", self.K, dim=-1):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
 
-            # # Add custom loss (negative means penalty, positive means reward)
-            # # kBET(zloc_tr, group_sample_labels[train_indices])
-            # kbet_loss = kBET(z, y)  
-            # pyro.factor("custom_term", -kbet_loss)
 
             # Decoder output as GP mean
             loc, scl = self.gp_predict(lengthscale, variance, self.decode(z, y))
@@ -4303,13 +4299,10 @@ class SupMlpGpVAE(nn.Module):
         xhat_lst = []
         z_loc_lst = []
 
-        # # GP hyperparameters 
-        # lengthscale = pyro.param("lengthscale_loc").exp()
-        # variance = pyro.param("variance_loc").exp()
+        # GP hyperparameters 
+        lengthscale = pyro.param("lengthscale_loc").exp()
+        variance = pyro.param("variance_loc").exp()
 
-        # GP kernel hyperparameters
-        lengthscale = pyro.param("gp_lengthscale", torch.tensor(4.0, device=self.device), constraint=dist.constraints.positive)
-        variance = pyro.param("gp_variance", torch.tensor(0.3, device=self.device), constraint=dist.constraints.positive)
 
         # Iterate through the data loader
         with torch.no_grad():
