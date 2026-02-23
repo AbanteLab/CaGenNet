@@ -1,6 +1,7 @@
 # Description: Pyro models for the snDGM and VAE models.
 
 # torch
+from statistics import variance
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +12,9 @@ import pyro.contrib.gp as gp
 import pyro.distributions as dist
 from pyro.optim import ClippedAdam
 from pyro.infer import SVI, TraceMeanField_ELBO, Trace_ELBO
+
+# sklearn
+from sklearn.metrics import accuracy_score
 
 # distributions
 from ca_sn_gen_models.utils import superprint, gen_random_mask
@@ -556,6 +560,7 @@ class FA(nn.Module):
         Returns:
             tuple: Posterior of Z (torch.Tensor), W (torch.Tensor), and sigma (torch.Tensor).
         """
+        print(self.parameters())
         self.eval()
         with torch.no_grad():
             Z_loc = pyro.param("Z_loc").cpu().detach().numpy()
@@ -1290,6 +1295,7 @@ class FixedVarSupMlpVAE(nn.Module):
         self.name = "FixedVarSupMlpVAE"
         self.fix_scl = True
         self.sup = True
+        self.beta = 1.0         # weight of the KL divergence term
 
         # Store variables
         self.D = D              # number of time steps
@@ -1393,11 +1399,12 @@ class FixedVarSupMlpVAE(nn.Module):
             alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / (1.0 * self.NS)
             y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
             
+            # Weigh KL divergence by scaling factor (e.g., beta)
+            # with pyro.poutine.scale(scale=self.beta):  # Change 0.1 to your desired KL weight
             with pyro.plate("latent_dim", self.K, dim=-1):
-
                 # Standard normal prior for latent variables
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
-            
+                
             # parameters of posterior
             loc = self.decode(z,y)
 
@@ -1407,7 +1414,7 @@ class FixedVarSupMlpVAE(nn.Module):
 
     def guide(self, x, y):
         """
-        Defines the variational guide q(W, Z, sigma).
+        Defines the variational guide q(W, Z, sigma) with beta weighting for KL divergence.
         """
         
         # register modules with pyro
@@ -1423,11 +1430,281 @@ class FixedVarSupMlpVAE(nn.Module):
         
         # samples posterior
         with pyro.plate("data", batch_size, dim=-2):
-
+            # Weigh KL divergence by scaling factor (e.g., beta)
+            # with pyro.poutine.scale(scale=self.beta):
             with pyro.plate("latent_dim", self.K, dim=-1):
-            
                 # sample z
                 pyro.sample("z", dist.Normal(loc, scl))
+
+    def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3, roll=False):
+        
+        # Set model to training mode
+        self.train()
+
+        # Define optimizer and SVI
+        optimizer = ClippedAdam({"lr": lr})
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        
+        # Training loop
+        train_loss_history = []
+        val_loss_history = []
+        
+        # patience counter
+        patience_counter = 0
+        best_loss = float("inf")
+
+        # Train the model
+        for epoch in range(num_epochs):
+            
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            for batch in data_loader:
+                
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                
+                # apply random roll to x_batch
+                if roll:
+                    x_batch = torch.roll(x_batch, shifts=torch.randint(0, x_batch.size(1), (1,)).item(), dims=1)
+
+                train_loss += svi.step(x_batch, y_batch) / x_batch.size(0)
+                
+            train_loss /= len(data_loader.dataset)
+            train_loss_history.append(train_loss)
+            
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    
+                    x_batch = batch[0].to(self.device)
+                    y_batch = batch[1].to(self.device)
+
+                    val_loss += svi.evaluate_loss(x_batch, y_batch) / x_batch.size(0)
+                    
+            val_loss /= len(val_loader.dataset)
+            val_loss_history.append(val_loss)
+            
+            # Early stopping
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # return loss history
+        return train_loss_history,val_loss_history
+    
+    def forward(self, loader):
+        """
+        Forward pass through the model for a given data loader.
+        
+        Args:
+            loader (DataLoader): DataLoader containing the input data.
+        
+        Returns:
+            tuple: (z_loc, xhat) where z_loc is the latent mean and xhat is the reconstructed output.
+        """
+        
+        self.eval()
+        
+        with torch.no_grad():
+            for batch in loader:
+                x_batch = batch[0].to(self.device)
+                y_batch = batch[1].to(self.device)
+                z_loc, _ = self.encode(x_batch,y_batch)
+                xhat = self.decode(z_loc,y_batch)
+        
+        return z_loc, xhat
+
+
+
+class FixedVarSupMlpBVAE(nn.Module):
+    """
+    FixedVarSupMlpVAE is a supervised variational autoencoder (VAE) model with fixed variance, implemented using PyTorch and Pyro. 
+    It is designed for semi-supervised learning tasks where both input data and class labels are available. The model uses 
+    multi-layer perceptrons (MLPs) for both the encoder and decoder networks, and incorporates class label information 
+    via concatenation with the input and latent variables. The encoder maps input data and labels to a latent space, 
+    while the decoder reconstructs the input from the latent representation and labels. The model supports training 
+    with early stopping and tracks both training and validation loss histories.
+        D (int): Number of input features or time steps.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes (for one-hot encoded labels).
+        device (str, optional): Device to run the model on ('cpu' or 'cuda'). Default is 'cpu'.
+    Attributes:
+        D (int): Number of input features or time steps.
+        K (int): Dimensionality of the latent space.
+        NS (int): Number of classes.
+        device (str): Device used for computation.
+        encoder_mlp (nn.Sequential): Encoder MLP network.
+        encoder_loc (nn.Sequential): Network to compute mean of latent distribution.
+        encoder_scl (nn.Sequential): Network to compute scale of latent distribution.
+        decoder_mlp (nn.Sequential): Decoder MLP network.
+        decoder_loc (nn.Sequential): Network to compute reconstructed data mean.
+    Methods:
+        encode(x, y): Encodes input data and labels into latent mean and scale.
+        decode(z, y): Decodes latent variables and labels into reconstructed data.
+        model(x, y): Defines the generative model for Pyro.
+        guide(x, y): Defines the variational guide for Pyro.
+        train_model(data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3): 
+            Trains the model using SVI with early stopping and returns loss histories.
+    """
+    def __init__(self, D, K, NS, scl=1e-3, beta = 1.0, device="cpu"):
+        
+        # Inherit from nn.Module
+        super().__init__()
+        
+        # define properties of model
+        self.name = "FixedVarSupMlpVAE"
+        self.fix_scl = True
+        self.sup = True
+        self.beta = beta        # weight of the KL divergence term
+
+        # Store variables
+        self.D = D              # number of time steps
+        self.K = K              # latent dimension
+        self.NS = NS            # number of classes
+        self.scl = scl          # scale of the output distribution
+        self.device = device
+        
+        # define encoder
+        self.encoder_mlp = nn.Sequential(
+            nn.Linear(D + NS, (D + NS) // 2), nn.ReLU(),
+            nn.Linear((D + NS) // 2, 4 * K), nn.ReLU(),
+            nn.Linear(4 * K, 2 * K)
+        )
+        self.encoder_loc = nn.Sequential(nn.Linear(2 * K, K))
+        self.encoder_scl = nn.Sequential(nn.Linear(2 * K, K), nn.Softplus())
+        
+        # define decoder
+        self.decoder_mlp = nn.Sequential(
+            nn.Linear(K + NS, D // 8), nn.ReLU(), 
+            nn.Linear(D // 8, D // 4), nn.ReLU(),
+            nn.Linear(D // 4, D // 2)
+            )
+        self.decoder_loc = nn.Sequential(nn.Linear(D // 2, D))
+        
+        # Move model to device
+        self.to(self.device)
+
+    def encode(self, x, y):
+        """
+        Encodes the input data into a latent representation.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N, D].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Encoded latent representation of shape [N, K].
+        """
+        
+        # replace nans with zeros if any
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Combine the input data x and labels y
+        xy = torch.cat((x, y), dim=-1)
+        
+        # Process the combined representation through the encoder network
+        xy_emb = self.encoder_mlp(xy)
+        
+        # Compute the mean and scale of the latent representation
+        loc = self.encoder_loc(xy_emb)
+        scl = torch.clamp(self.encoder_scl(xy_emb), min=1e-3)
+        
+        # Return the mean and scale of the latent representation
+        return loc, scl
+    
+    def decode(self, z, y):
+        """
+        Decodes the latent representation into the original data space.
+
+        Args:
+            z (torch.Tensor): Latent representation of shape [N, K].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            torch.Tensor: Reconstructed data of shape [N, D].
+        """
+        
+        # concatenate z [batch, K] and y [batch, NS] -> [batch, K + NS] 
+        zy = torch.cat((z, y), dim=-1)
+        
+        # run through MLP [N, D // 2]
+        zy = self.decoder_mlp(zy)
+        
+        # compute location [N, D]
+        loc = self.decoder_loc(zy)
+        
+        # return the location and log scale
+        return loc
+    
+    def model(self, x, y):
+        """
+        Defines the generative model P(X | Z, W, sigma^2).
+        """
+
+        # register modules with pyro
+        pyro.module("decoder_mlp", self.decoder_mlp)
+        pyro.module("decoder_loc", self.decoder_loc)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # prior parameters for Z
+        z_loc_prior = torch.zeros(batch_size, self.K, device=self.device)
+        z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
+        
+        # Prior for latent variables Z
+        with pyro.plate("data", batch_size, dim=-2):
+
+            # sample label
+            alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / (1.0 * self.NS)
+            y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
+            
+            # Weigh KL divergence by scaling factor (e.g., beta)
+            with pyro.poutine.scale(scale=self.beta):  # Change 0.1 to your desired KL weight
+                with pyro.plate("latent_dim", self.K, dim=-1):
+                    # Standard normal prior for latent variables
+                    z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
+                
+            # parameters of posterior
+            loc = self.decode(z,y)
+
+            with pyro.plate("obs_dim", self.D, dim=-1):
+                
+                pyro.sample("x", dist.NanMaskedNormal(loc, self.scl), obs=x)
+
+    def guide(self, x, y):
+        """
+        Defines the variational guide q(W, Z, sigma) with beta weighting for KL divergence.
+        """
+        
+        # register modules with pyro
+        pyro.module("encoder_mlp", self.encoder_mlp)
+        pyro.module("encoder_loc", self.encoder_loc)
+        pyro.module("encoder_scl", self.encoder_scl)
+        
+        # Get the batch size from input x
+        batch_size = x.shape[0]
+
+        # get posterior parameters
+        loc, scl = self.encode(x, y)
+        
+        # samples posterior
+        with pyro.plate("data", batch_size, dim=-2):
+            # Weigh KL divergence by scaling factor (e.g., beta)
+            with pyro.poutine.scale(scale=self.beta):
+                with pyro.plate("latent_dim", self.K, dim=-1):
+                    # sample z
+                    pyro.sample("z", dist.Normal(loc, scl))
 
     def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3, roll=False):
         
@@ -3763,6 +4040,17 @@ class SupMlpGpVAE(nn.Module):
         # return the location and log scale
         return self.decoder_mlp(zy)
     
+    def matern32(self, diff, lengthscale, variance):
+        r = torch.abs(diff) / lengthscale
+        return variance * (1.0 + torch.sqrt(torch.tensor(3.0)) * r) * \
+            torch.exp(-torch.sqrt(torch.tensor(3.0)) * r)
+
+    def matern52(self, diff, lengthscale, variance):
+        r = torch.abs(diff) / lengthscale
+        sqrt5 = torch.sqrt(torch.tensor(5.0))
+        return variance * (1.0 + sqrt5 * r + 5.0 * r**2 / 3.0) * \
+            torch.exp(-sqrt5 * r)
+        
     def gp_predict(self, lengthscale, variance, gp_loc):
         """
         Computes the predictive mean and covariance for the GP decoder.
@@ -3783,12 +4071,18 @@ class SupMlpGpVAE(nn.Module):
 
         # Compute covariance between inducing points: Kuu € [M, M]
         diff_uu = Tu - Tu.T  # [M, M]
-        Kuu = variance * torch.exp(-0.5 * (diff_uu ** 2) / (lengthscale ** 2))
-        Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)  # jitter for stability
+            # --- Matérn kernel ---
+        Kuu = self.matern32(diff_uu, lengthscale, variance)
+        Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)
+
+        # Kuu = variance * torch.exp(-0.5 * (diff_uu ** 2) / (lengthscale ** 2))
+        # Kuu = Kuu + 1e-5 * torch.eye(self.M, device=self.device)  # jitter for stability
 
         # Compute covariance between inducing points and full points: Kuf € [M, D]
         diff_uf = Tu - T.T  # [M, D]
-        Kuf = variance * torch.exp(-0.5 * (diff_uf ** 2) / (lengthscale ** 2))  # [M, D]
+        # --- Matérn kernel ---
+        Kuf = self.matern32(diff_uf, lengthscale, variance)
+        # Kuf = variance * torch.exp(-0.5 * (diff_uf ** 2) / (lengthscale ** 2))  # [M, D]
 
         # Compute covariance at full points: Kff € [D, D]
         Kff_diag = variance * torch.ones(self.D, device=self.device)  # only diagonal needed
@@ -3808,6 +4102,39 @@ class SupMlpGpVAE(nn.Module):
         scl = torch.clamp(scl, min=1e-4)
 
         return loc, scl
+        
+    def get_likelihood(self, x, y):
+        """
+        Computes the average normalized likelihood (log probability) of the observed data x under the current model parameters.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N, D].
+            y (torch.Tensor): One-hot encoded labels of shape [N, NS].
+
+        Returns:
+            float: Averaged normalized log likelihood over all samples.
+        """
+        self.eval()
+        with torch.no_grad():
+            batch_size = x.shape[0]
+
+            # Get GP kernel parameters from param store
+            lengthscale = pyro.param("lengthscale_loc").exp()
+            variance = pyro.param("variance_loc").exp()
+
+            # # GP kernel hyperparameters
+            # lengthscale = pyro.param("gp_lengthscale", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
+            # variance = pyro.param("gp_variance", torch.tensor(0.1, device=self.device), constraint=dist.constraints.positive)
+
+            # Encode and decode to get GP mean at inducing points
+            z_loc, _ = self.encode(x, y)
+            gp_loc = self.decode(z_loc, y)
+            # GP predictive mean and variance
+            loc, scl = self.gp_predict(lengthscale, variance, gp_loc)
+            # Compute log likelihood for each sample and dimension
+            log_prob = dist.Normal(loc, scl.sqrt()).log_prob(x)
+            # Normalize per dimension and per sample, then average over all samples
+            return log_prob.mean(dim=-1).mean().item()
     
     def model(self, x, y):
         """
@@ -3832,8 +4159,8 @@ class SupMlpGpVAE(nn.Module):
         z_scl_prior = torch.ones(batch_size, self.K, device=self.device)
 
         # GP kernel hyperparameters (fixed). TODO: put a prior on these
-        lengthscale = pyro.param("gp_lengthscale", torch.tensor(10.0, device=self.device), constraint=dist.constraints.positive)
-        variance = pyro.param("gp_variance", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
+        lengthscale = pyro.param("gp_lengthscale", torch.tensor(4, device=self.device), constraint=dist.constraints.positive)
+        variance = pyro.param("gp_variance", torch.tensor(0.3, device=self.device), constraint=dist.constraints.positive)
 
         # pyro sample statements
         with pyro.plate("data", batch_size, dim=-2):
@@ -3841,9 +4168,14 @@ class SupMlpGpVAE(nn.Module):
             # sample label
             alpha_prior = torch.ones([batch_size, self.NS], device=self.device) / float(self.NS)
             y = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=y)
-
+            # with pyro.poutine.scale(scale=2.0):  # scale to emphasize latent sampling
             with pyro.plate("latent_dim", self.K, dim=-1):
                 z = pyro.sample("z", dist.Normal(z_loc_prior, z_scl_prior))
+
+            # # Add custom loss (negative means penalty, positive means reward)
+            # # kBET(zloc_tr, group_sample_labels[train_indices])
+            # kbet_loss = kBET(z, y)  
+            # pyro.factor("custom_term", -kbet_loss)
 
             # Decoder output as GP mean
             loc, scl = self.gp_predict(lengthscale, variance, self.decode(z, y))
@@ -3862,7 +4194,7 @@ class SupMlpGpVAE(nn.Module):
         pyro.module("encoder_mlp", self.encoder_mlp)
         pyro.module("encoder_loc", self.encoder_loc)
         pyro.module("encoder_scl", self.encoder_scl)
-        
+
         # Get the batch size from input x
         batch_size = x.shape[0]
 
@@ -3875,7 +4207,8 @@ class SupMlpGpVAE(nn.Module):
             with pyro.plate("latent_dim", self.K, dim=-1):
             
                 # sample z
-                pyro.sample("z", dist.Normal(loc, scl))
+                z = pyro.sample("z", dist.Normal(loc, scl))
+
 
     def train_model(self, data_loader, val_loader, num_epochs=5000, lr=1e-3, patience=100, min_delta=1e-3, roll=False):
         """
@@ -3904,6 +4237,7 @@ class SupMlpGpVAE(nn.Module):
         # Training loop
         train_loss_history = []
         val_loss_history = []
+        val_likelihood_history = []
         
         # patience counter
         patience_counter = 0
@@ -3932,6 +4266,7 @@ class SupMlpGpVAE(nn.Module):
             # Validation phase
             self.eval()
             val_loss = 0.0
+            val_likelihood = 0.0
             with torch.no_grad():
                 for batch in val_loader:
                     
@@ -3939,10 +4274,18 @@ class SupMlpGpVAE(nn.Module):
                     y_batch = batch[1].to(self.device)
 
                     val_loss += svi.evaluate_loss(x_batch, y_batch) / x_batch.size(0)
-                    
+                    # val_likelihood += self.get_likelihood(x_batch, y_batch) / x_batch.size(0)
+                    # print("Size val_ll ", val_likelihood.size())
+                    # print('x_batch size ', x_batch.size())
+                    # print('y_batch size ', y_batch.size())
+                    # print('val_loss size ', val_loss.size())
+
             val_loss /= len(val_loader.dataset)
             val_loss_history.append(val_loss)
-            
+
+            # val_likelihood /= len(val_loader.dataset)
+            # val_likelihood_history.append(val_likelihood)
+
             # Early stopping
             if val_loss < best_loss - min_delta:
                 best_loss = val_loss
@@ -3953,10 +4296,12 @@ class SupMlpGpVAE(nn.Module):
                     print(f"Early stopping at epoch {epoch + 1}")
                     break
 
-            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        
+            superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Likelihood: {val_likelihood:.4f}")
+
+            # superprint(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Kernel Lengthscale: {pyro.get_param_store().get_param('gp_lengthscale').item():.4f}, Kernel Variance: {pyro.get_param_store().get_param('gp_variance').item():.4f}")
+
         # return loss history
-        return train_loss_history,val_loss_history
+        return train_loss_history, val_loss_history
     
     def forward(self, loader):
         """
@@ -3975,9 +4320,13 @@ class SupMlpGpVAE(nn.Module):
         xhat_lst = []
         z_loc_lst = []
 
+        # # GP hyperparameters 
+        # lengthscale = pyro.param("lengthscale_loc").exp()
+        # variance = pyro.param("variance_loc").exp()
+
         # GP kernel hyperparameters
-        lengthscale = pyro.param("gp_lengthscale", torch.tensor(10.0, device=self.device), constraint=dist.constraints.positive)
-        variance = pyro.param("gp_variance", torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
+        lengthscale = pyro.param("gp_lengthscale", torch.tensor(4.0, device=self.device), constraint=dist.constraints.positive)
+        variance = pyro.param("gp_variance", torch.tensor(0.3, device=self.device), constraint=dist.constraints.positive)
 
         # Iterate through the data loader
         with torch.no_grad():
@@ -4001,3 +4350,4 @@ class SupMlpGpVAE(nn.Module):
 
         # Return the latent mean and reconstructed output
         return z_loc, xhat
+    
