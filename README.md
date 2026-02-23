@@ -29,5 +29,27 @@ This script demonstrates how to train a Deep Generative Model (DGM) using the pa
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
 
+## Generative models
+
+- **FA (Factor Analysis)**: Exponential-family factor analysis with configurable likelihoods and SVI training (`train_model`, `get_posterior`).
+- **isoFA**: FA variant that models paired latents `Zx`/`Zy` for joint modeling of signals and labels (includes `CustomELBO` regularizer).
+- **FixedVarMlpVAE / LearnedVarMlpVAE**: Unsupervised MLP VAEs for time-series; differ in whether the output likelihood scale is fixed or learned. Provide `encode`, `decode`, `model`, `guide`, `train_model`, and `forward` helpers.
+- **FixedVarSupMlpVAE / FixedVarSupMlpBVAE**: Supervised/semi-supervised VAE variants that incorporate labels into encoding/decoding and support supervised training flows.
+
 ## License
+
 This project is licensed under the Apache License. See the LICENSE file for details.
+
+## Papers
+
+- B Ros; M Olives-Verger; C Fuses; JM Canals; J Soriano; J Abante (2026). Integration of Calcium Imaging Traces via Deep Generative Modeling. *2026 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)*. IEEE (in print).
+
+## Documentation
+
+Full documentation (Sphinx / ReadTheDocs) is available in the `docs/` directory. To build locally:
+
+```bash
+pip install -r requirements.txt
+pip install sphinx sphinx_rtd_theme myst-parser
+cd docs && make html
+```
